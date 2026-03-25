@@ -1,5 +1,15 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Instance, VPNClient, api, fmtBytes } from '../api/client'
+
+function cliCommand(instanceId: string): string {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  return `sudo otiv-client -url ${proto}://${location.host}/vpn/${instanceId}`
+}
+
+function proxyCommand(instanceId: string): string {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  return `otiv-proxy -url ${proto}://${location.host}/vpn/${instanceId}`
+}
 
 interface Props {
   instance: Instance
@@ -7,18 +17,54 @@ interface Props {
 }
 
 export default function InstanceCard({ instance, onDelete }: Props) {
-  const [clients, setClients] = useState<VPNClient[]>(instance.clients)
-  const [refreshing, setRefreshing] = useState(false)
+  const [clients, setClients] = useState<VPNClient[]>(instance.clients ?? [])
+  const [status, setStatus] = useState(instance.status)
+  const [toggling, setToggling] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [copiedClient, setCopiedClient] = useState(false)
+  const [copiedProxy, setCopiedProxy] = useState(false)
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  async function refresh() {
-    setRefreshing(true)
+  // Sync status when parent re-renders (10s poll)
+  useEffect(() => { setStatus(instance.status) }, [instance.status])
+
+  // Poll clients every 200ms when running
+  useEffect(() => {
+    if (status !== 'running') {
+      setClients([])
+      return
+    }
+    let active = true
+    async function poll() {
+      try {
+        const data = await api.getClients(instance.id)
+        if (active) setClients(data ?? [])
+      } catch {
+        // management interface not ready yet — ignore
+      }
+    }
+    poll()
+    pollingRef.current = setInterval(poll, 200)
+    return () => {
+      active = false
+      if (pollingRef.current) clearInterval(pollingRef.current)
+    }
+  }, [status, instance.id])
+
+  async function handleToggle() {
+    setToggling(true)
     try {
-      setClients(await api.getClients(instance.id))
-    } catch {
-      // management interface might not be ready yet
+      if (status === 'running') {
+        await api.stopInstance(instance.id)
+        setStatus('stopped')
+      } else {
+        await api.startInstance(instance.id)
+        setStatus('running')
+      }
+    } catch (e) {
+      alert(String(e))
     } finally {
-      setRefreshing(false)
+      setToggling(false)
     }
   }
 
@@ -34,7 +80,20 @@ export default function InstanceCard({ instance, onDelete }: Props) {
     }
   }
 
+  function copyClient() {
+    navigator.clipboard.writeText(cliCommand(instance.id))
+    setCopiedClient(true)
+    setTimeout(() => setCopiedClient(false), 2000)
+  }
+
+  function copyProxy() {
+    navigator.clipboard.writeText(proxyCommand(instance.id))
+    setCopiedProxy(true)
+    setTimeout(() => setCopiedProxy(false), 2000)
+  }
+
   const createdAt = new Date(instance.created_at).toLocaleString()
+  const isRunning = status === 'running'
 
   return (
     <div style={styles.card}>
@@ -42,18 +101,18 @@ export default function InstanceCard({ instance, onDelete }: Props) {
         <div>
           <div style={styles.name}>{instance.name}</div>
           <div style={styles.meta}>
-            <span style={statusBadge(instance.status)}>{instance.status}</span>
+            <span style={statusBadge(status)}>{status}</span>
             <span style={styles.dim}>subnet: {instance.subnet}/24</span>
             <span style={styles.dim}>created: {createdAt}</span>
           </div>
         </div>
         <div style={styles.actions}>
           <button
-            onClick={refresh}
-            disabled={refreshing}
-            style={{ background: '#374151', color: '#e2e8f0' }}
+            onClick={handleToggle}
+            disabled={toggling}
+            style={{ background: isRunning ? '#b45309' : '#16a34a', color: '#fff' }}
           >
-            {refreshing ? '...' : 'Refresh'}
+            {toggling ? '...' : isRunning ? 'Stop' : 'Resume'}
           </button>
           <a href={api.clientConfigUrl(instance.id)} download>
             <button style={{ background: '#4f46e5', color: '#fff' }}>
@@ -75,7 +134,9 @@ export default function InstanceCard({ instance, onDelete }: Props) {
           Connected clients ({clients.length})
         </div>
         {clients.length === 0 ? (
-          <div style={styles.empty}>No clients connected</div>
+          <div style={styles.empty}>
+            {isRunning ? 'No clients connected' : 'Instance stopped'}
+          </div>
         ) : (
           <table style={styles.table}>
             <thead>
@@ -104,9 +165,27 @@ export default function InstanceCard({ instance, onDelete }: Props) {
       </div>
 
       <div style={styles.section}>
-        <div style={styles.sectionTitle}>Instance ID</div>
-        <code style={styles.code}>{instance.id}</code>
-        <div style={styles.dim} hidden>WSS path: /vpn/{instance.id}</div>
+        <div style={styles.sectionTitle}>Connect</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div>
+            <div style={styles.cmdLabel}>
+              <span style={styles.cmdTag}>otiv-client</span>
+              <button onClick={copyClient} style={{ ...styles.copyBtn, background: copiedClient ? '#16a34a' : '#374151' }}>
+                {copiedClient ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+            <code style={styles.code}>{cliCommand(instance.id)}</code>
+          </div>
+          <div>
+            <div style={styles.cmdLabel}>
+              <span style={styles.cmdTag}>otiv-proxy</span>
+              <button onClick={copyProxy} style={{ ...styles.copyBtn, background: copiedProxy ? '#16a34a' : '#374151' }}>
+                {copiedProxy ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+            <code style={styles.code}>{proxyCommand(instance.id)}</code>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -172,5 +251,24 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     color: '#818cf8',
     wordBreak: 'break-all',
+  },
+  cmdLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 4,
+  },
+  cmdTag: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#9ca3af',
+    background: '#1f2937',
+    borderRadius: 4,
+    padding: '1px 7px',
+  },
+  copyBtn: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    padding: '2px 10px',
   },
 }

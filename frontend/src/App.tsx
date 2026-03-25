@@ -12,6 +12,7 @@ export default function App() {
   const load = useCallback(async () => {
     try {
       const data = await api.listInstances()
+      data.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
       setInstances(data)
       setError(null)
     } catch (e) {
@@ -33,7 +34,9 @@ export default function App() {
     setCreating(true)
     try {
       const inst = await api.createInstance(newName.trim())
-      setInstances(prev => [inst, ...prev])
+      setInstances(prev =>
+        [...prev, inst].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      )
       setNewName('')
     } catch (e) {
       alert(String(e))

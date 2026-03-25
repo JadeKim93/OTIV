@@ -74,28 +74,79 @@ func (m *Manager) loadInstances() error {
 	}
 
 	ctx := context.Background()
+	timeout := 5
 	for _, inst := range instances {
+		// Stop and remove any existing container for this instance.
+		// On restart we always spin up a fresh container so state is clean.
+		if inst.ContainerID != "" {
+			_ = m.docker.ContainerStop(ctx, inst.ContainerID, container.StopOptions{Timeout: &timeout})
+			_ = m.docker.ContainerRemove(ctx, inst.ContainerID, container.RemoveOptions{Force: true})
+			inst.ContainerID = ""
+		}
+
+		// Re-create the container using the existing config files on disk.
+		if err := m.startContainer(ctx, inst); err != nil {
+			log.Printf("loadInstances: failed to restart %s (%s): %v", inst.Name, inst.ID[:8], err)
+			inst.Status = "stopped"
+		} else {
+			inst.Status = "running"
+		}
+
 		inst.MgmtAddr = m.containerMgmtAddr(inst.ID)
-		inst.Status = m.reconcileStatus(ctx, inst.ContainerID)
 		m.instances[inst.ID] = inst
 	}
+	_ = m.saveInstances()
 	return nil
 }
 
-// reconcileStatus checks the actual Docker container state and returns the
-// correct status string. Called on startup to sync JSON state with reality.
-func (m *Manager) reconcileStatus(ctx context.Context, containerID string) string {
-	if containerID == "" {
-		return "stopped"
-	}
-	info, err := m.docker.ContainerInspect(ctx, containerID)
+// startContainer creates and starts a Docker container for inst, using the
+// config files already on disk. Updates inst.ContainerID on success.
+func (m *Manager) startContainer(ctx context.Context, inst *Instance) error {
+	containerName := m.containerName(inst.ID)
+	hostInstanceDir := filepath.Join(m.cfg.HostDataDir, "instances", inst.ID)
+
+	resp, err := m.docker.ContainerCreate(ctx,
+		&container.Config{
+			Image:  m.cfg.OVPNImage,
+			Labels: map[string]string{"com.otiv.instance": "true"},
+		},
+		&container.HostConfig{
+			Binds:   []string{hostInstanceDir + ":/etc/openvpn:ro"},
+			CapAdd:  []string{"NET_ADMIN"},
+			Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
+			Resources: container.Resources{
+				Devices: []container.DeviceMapping{
+					{PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun", CgroupPermissions: "rwm"},
+				},
+			},
+			LogConfig: container.LogConfig{
+				Type: "json-file",
+				Config: map[string]string{
+					"max-size": "10m",
+					"max-file": "10",
+				},
+			},
+		},
+		nil, nil, containerName,
+	)
 	if err != nil {
-		return "stopped" // container removed or not found
+		return fmt.Errorf("create container: %w", err)
 	}
-	if info.State.Running {
-		return "running"
+
+	if err := m.docker.NetworkConnect(ctx, m.cfg.VPNNetwork, resp.ID, &network.EndpointSettings{
+		Aliases: []string{containerName},
+	}); err != nil {
+		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return fmt.Errorf("connect vpn network: %w", err)
 	}
-	return "stopped"
+
+	if err := m.docker.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return fmt.Errorf("start container: %w", err)
+	}
+
+	inst.ContainerID = resp.ID
+	return nil
 }
 
 func (m *Manager) saveInstances() error {
@@ -116,7 +167,6 @@ func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, e
 
 	id := uuid.New().String()
 	subnet := m.allocateSubnet()
-	containerName := m.containerName(id)
 
 	// Generate certs
 	serverCert, err := m.pki.GenerateServerCert("server-" + id[:8])
@@ -150,62 +200,20 @@ func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, e
 		}
 	}
 
-	// hostInstanceDir is the path as seen by the Docker daemon (host filesystem).
-	// instanceDir is the backend container's internal path; the Docker daemon
-	// needs the host-side path for sibling container bind mounts.
-	hostInstanceDir := filepath.Join(m.cfg.HostDataDir, "instances", id)
-
-	// Create and start Docker container
-	resp, err := m.docker.ContainerCreate(ctx,
-		&container.Config{
-			Image:  m.cfg.OVPNImage,
-			Labels: map[string]string{"com.otiv.instance": "true"},
-		},
-		&container.HostConfig{
-			Binds:   []string{hostInstanceDir + ":/etc/openvpn:ro"},
-			CapAdd:  []string{"NET_ADMIN"},
-			Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
-			Resources: container.Resources{
-				Devices: []container.DeviceMapping{
-					{PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun", CgroupPermissions: "rwm"},
-				},
-			},
-			LogConfig: container.LogConfig{
-				Type: "json-file",
-				Config: map[string]string{
-					"max-size": "10m",
-					"max-file": "10",
-				},
-			},
-		},
-		nil, nil, containerName,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create container: %w", err)
+	inst := &Instance{
+		ID:        id,
+		Name:      name,
+		Subnet:    subnet,
+		Status:    "stopped",
+		CreatedAt: time.Now(),
+		MgmtAddr:  m.containerMgmtAddr(id),
 	}
 
 	// OpenVPN 컨테이너는 internal 네트워크에만 연결 — 호스트로 나가는 경로 없음
-	if err := m.docker.NetworkConnect(ctx, m.cfg.VPNNetwork, resp.ID, &network.EndpointSettings{
-		Aliases: []string{containerName},
-	}); err != nil {
-		m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("connect vpn network: %w", err)
+	if err := m.startContainer(ctx, inst); err != nil {
+		return nil, err
 	}
-
-	if err := m.docker.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("start container: %w", err)
-	}
-
-	inst := &Instance{
-		ID:          id,
-		Name:        name,
-		Subnet:      subnet,
-		ContainerID: resp.ID,
-		Status:      "running",
-		CreatedAt:   time.Now(),
-		MgmtAddr:    m.containerMgmtAddr(id),
-	}
+	inst.Status = "running"
 
 	m.instances[id] = inst
 	_ = m.saveInstances()
@@ -281,6 +289,44 @@ func (m *Manager) GenerateClientConfig(id string) ([]byte, error) {
 
 	cfg := fmt.Sprintf(ovpnClientConfig, ca, cert.CertPEM, cert.KeyPEM)
 	return []byte(cfg), nil
+}
+
+func (m *Manager) StopInstance(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	inst, ok := m.instances[id]
+	if !ok {
+		return fmt.Errorf("instance %s not found", id)
+	}
+	if inst.ContainerID != "" {
+		timeout := 5
+		_ = m.docker.ContainerStop(ctx, inst.ContainerID, container.StopOptions{Timeout: &timeout})
+		_ = m.docker.ContainerRemove(ctx, inst.ContainerID, container.RemoveOptions{Force: true})
+		inst.ContainerID = ""
+	}
+	inst.Status = "stopped"
+	_ = m.saveInstances()
+	return nil
+}
+
+func (m *Manager) StartInstance(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	inst, ok := m.instances[id]
+	if !ok {
+		return fmt.Errorf("instance %s not found", id)
+	}
+	if inst.Status == "running" {
+		return nil
+	}
+	if err := m.startContainer(ctx, inst); err != nil {
+		return err
+	}
+	inst.Status = "running"
+	_ = m.saveInstances()
+	return nil
 }
 
 func (m *Manager) containerName(id string) string {

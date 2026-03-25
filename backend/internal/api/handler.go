@@ -41,6 +41,8 @@ func (h *Handler) Routes() http.Handler {
 		r.Get("/", h.listInstances)
 		r.Post("/", h.createInstance)
 		r.Delete("/{id}", h.deleteInstance)
+		r.Post("/{id}/stop", h.stopInstance)
+		r.Post("/{id}/start", h.startInstance)
 		r.Get("/{id}/clients", h.getClients)
 		r.Get("/{id}/client-config", h.downloadClientConfig)
 	})
@@ -106,7 +108,26 @@ func (h *Handler) createInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, inst)
+	writeJSON(w, http.StatusCreated, instanceResponse{Instance: inst, Clients: []vpn.VPNClient{}})
+}
+
+func (h *Handler) stopInstance(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.manager.StopInstance(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) startInstance(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.manager.StartInstance(r.Context(), id); err != nil {
+		log.Printf("start instance error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) deleteInstance(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +148,7 @@ func (h *Handler) getClients(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clients, err := inst.GetClients()
-	if err != nil {
+	if err != nil || clients == nil {
 		clients = []vpn.VPNClient{}
 	}
 	writeJSON(w, http.StatusOK, clients)

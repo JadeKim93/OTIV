@@ -40,6 +40,12 @@ export const api = {
   deleteInstance: (id: string) =>
     request<void>(`/api/instances/${id}`, { method: 'DELETE' }),
 
+  stopInstance: (id: string) =>
+    request<void>(`/api/instances/${id}/stop`, { method: 'POST' }),
+
+  startInstance: (id: string) =>
+    request<void>(`/api/instances/${id}/start`, { method: 'POST' }),
+
   getClients: (id: string) =>
     request<VPNClient[]>(`/api/instances/${id}/clients`),
 
