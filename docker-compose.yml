@@ -11,6 +11,8 @@ services:
     command: ["/backend", "-config", "/etc/otiv/config.yaml"]
     ports:
       - "8000:8080"
+    environment:
+      - HOST_DATA_DIR=${PWD}/data
     volumes:
       - ./data:/data                    # 호스트 경로 — 사이드카 컨테이너 bind mount에 필요
       - /var/run/docker.sock:/var/run/docker.sock

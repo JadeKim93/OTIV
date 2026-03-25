@@ -135,9 +135,9 @@ func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, e
 	}
 
 	files := map[string][]byte{
-		"ca.crt":     caCert,
-		"server.crt": serverCert.CertPEM,
-		"server.key": serverCert.KeyPEM,
+		"ca.crt":      caCert,
+		"server.crt":  serverCert.CertPEM,
+		"server.key":  serverCert.KeyPEM,
 		"server.conf": []byte(fmt.Sprintf(ovpnServerConfig, subnet, mgmtPort)),
 	}
 	for name, data := range files {
@@ -150,6 +150,11 @@ func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, e
 		}
 	}
 
+	// hostInstanceDir is the path as seen by the Docker daemon (host filesystem).
+	// instanceDir is the backend container's internal path; the Docker daemon
+	// needs the host-side path for sibling container bind mounts.
+	hostInstanceDir := filepath.Join(m.cfg.HostDataDir, "instances", id)
+
 	// Create and start Docker container
 	resp, err := m.docker.ContainerCreate(ctx,
 		&container.Config{
@@ -157,7 +162,7 @@ func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, e
 			Labels: map[string]string{"com.otiv.instance": "true"},
 		},
 		&container.HostConfig{
-			Binds:   []string{instanceDir + ":/etc/openvpn:ro"},
+			Binds:   []string{hostInstanceDir + ":/etc/openvpn:ro"},
 			CapAdd:  []string{"NET_ADMIN"},
 			Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
 			Resources: container.Resources{
@@ -246,10 +251,12 @@ func (m *Manager) DeleteInstance(ctx context.Context, id string) error {
 }
 
 // VPNAddr returns the TCP address of the OpenVPN server for the given instance ID.
+// Returns false if the instance doesn't exist or its container is not running.
 func (m *Manager) VPNAddr(id string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if _, ok := m.instances[id]; !ok {
+	inst, ok := m.instances[id]
+	if !ok || inst.Status != "running" {
 		return "", false
 	}
 	return fmt.Sprintf("%s:%d", m.containerName(id), ovpnTCPPort), true
@@ -340,6 +347,7 @@ nobind
 persist-key
 persist-tun
 remote-cert-tls server
+data-ciphers AES-256-GCM:AES-128-GCM
 verb 3
 <ca>
 %s</ca>

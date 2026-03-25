@@ -18,6 +18,7 @@ func (t TLSConfig) Enabled() bool {
 type Config struct {
 	ListenAddr    string    `yaml:"listen_addr"`
 	DataDir       string    `yaml:"data_dir"`
+	HostDataDir   string    `yaml:"host_data_dir"` // 호스트에서 본 data_dir 경로 (사이드카 컨테이너 bind mount용)
 	DockerNetwork string    `yaml:"docker_network"`
 	VPNNetwork    string    `yaml:"vpn_network"`
 	OVPNImage     string    `yaml:"ovpn_image"`
@@ -31,15 +32,18 @@ func Load(path string) (*Config, error) {
 	cfg := defaults()
 
 	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return cfg, nil
-	}
-	if err != nil {
-		return nil, err
+	if !os.IsNotExist(err) {
+		if err != nil {
+			return nil, err
+		}
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, err
+		}
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, err
+	// Environment variable overrides YAML (useful for docker-compose sibling container path)
+	if v := os.Getenv("HOST_DATA_DIR"); v != "" {
+		cfg.HostDataDir = v
 	}
 
 	// Re-apply defaults for fields that were not set in the file
@@ -65,6 +69,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = d.DataDir
+	}
+	if cfg.HostDataDir == "" {
+		cfg.HostDataDir = cfg.DataDir
 	}
 	if cfg.DockerNetwork == "" {
 		cfg.DockerNetwork = d.DockerNetwork
