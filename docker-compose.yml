@@ -1,4 +1,5 @@
 x-logging: &logging
+  restart: always
   logging:
     driver: json-file
     options:
