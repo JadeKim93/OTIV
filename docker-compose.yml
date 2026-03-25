@@ -1,0 +1,44 @@
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "10"
+
+services:
+  backend:
+    build: ./backend
+    command: ["/backend", "-config", "/etc/otiv/config.yaml"]
+    ports:
+      - "8000:8080"
+    volumes:
+      - ./data:/data                    # 호스트 경로 — 사이드카 컨테이너 bind mount에 필요
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.yaml:/etc/otiv/config.yaml:ro
+      # TLS 인증서를 사용할 경우 아래 주석 해제
+      # - /etc/otiv/tls:/etc/otiv/tls:ro
+    depends_on:
+      - frontend
+    networks:
+      - otiv_network
+      - otiv_vpn_net
+    <<: *logging
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    volumes:
+      - ./frontend:/app
+    networks:
+      - otiv_network
+    <<: *logging
+
+networks:
+  otiv_network:
+    name: otiv_network
+    driver: bridge
+  otiv_vpn_net:
+    name: otiv_vpn_net
+    driver: bridge
+    internal: true   # 호스트로 나가는 게이트웨이 없음

@@ -1,0 +1,26 @@
+# OTIV Backend Configuration
+# 이 파일을 수정하고 docker compose up 으로 반영한다.
+
+# HTTP(S) 리스닝 주소
+listen_addr: ":8080"
+
+# PKI 및 인스턴스 데이터 저장 경로 (docker-compose의 ./data 볼륨과 일치)
+data_dir: /data
+
+# 백엔드/프론트엔드가 사용하는 Docker 네트워크
+docker_network: otiv_network
+
+# OpenVPN 컨테이너 전용 internal 네트워크 (호스트 접근 차단)
+vpn_network: otiv_vpn_net
+
+# OpenVPN Docker 이미지 이름 (make build 로 빌드)
+ovpn_image: otiv-openvpn
+
+# 프론트엔드 개발 서버 URL (백엔드가 리버스 프록시)
+frontend_url: http://frontend:5173
+
+# HTTPS 설정 — cert/key 를 지정하면 HTTPS 로 동작한다 (ws → wss 도 자동 적용)
+# OpenVPN 트래픽은 이미 자체 암호화되므로 WSS 는 웹 UI 보안용이다.
+# tls:
+#   cert: /etc/otiv/tls/cert.pem
+#   key:  /etc/otiv/tls/key.pem
