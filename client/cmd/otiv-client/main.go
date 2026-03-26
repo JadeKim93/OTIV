@@ -147,6 +147,11 @@ func fetchInstance(wsURL string) (*instance, error) {
 }
 
 func serverDNSIP(subnet string) string {
+	// subnet may be "10.8.0.0" or "10.8.0" — always return x.x.x.1
+	parts := strings.Split(subnet, ".")
+	if len(parts) >= 3 {
+		return strings.Join(parts[:3], ".") + ".1"
+	}
 	return subnet + ".1"
 }
 

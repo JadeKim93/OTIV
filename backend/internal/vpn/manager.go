@@ -373,6 +373,17 @@ func (m *Manager) GetInstanceClients(ctx context.Context, id string) ([]VPNClien
 	return clients, nil
 }
 
+// sanitizeHostname replaces whitespace with hyphens and lowercases the result
+// so the name is valid as a DNS label.
+func sanitizeHostname(name string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' {
+			return '-'
+		}
+		return r
+	}, name))
+}
+
 // SetHostname assigns a custom hostname to a client identified by its CN.
 func (m *Manager) SetHostname(ctx context.Context, instanceID, cn, hostname string) error {
 	m.mu.Lock()
@@ -385,7 +396,7 @@ func (m *Manager) SetHostname(ctx context.Context, instanceID, cn, hostname stri
 	if inst.Hostnames == nil {
 		inst.Hostnames = make(map[string]string)
 	}
-	inst.Hostnames[cn] = hostname
+	inst.Hostnames[cn] = sanitizeHostname(hostname)
 
 	clients, _ := inst.GetClients()
 	if clients == nil {
@@ -400,7 +411,8 @@ func (m *Manager) writeDNSHosts(inst *Instance, clients []VPNClient) error {
 	var sb strings.Builder
 	for _, c := range clients {
 		if name, ok := inst.Hostnames[c.CommonName]; ok && c.VirtualIP != "" {
-			sb.WriteString(fmt.Sprintf("%s %s.vpn.local %s\n", c.VirtualIP, name, name))
+			safe := sanitizeHostname(name)
+			sb.WriteString(fmt.Sprintf("%s %s.vpn.local %s\n", c.VirtualIP, safe, safe))
 		}
 	}
 	hostsPath := filepath.Join(m.dataDir, "instances", inst.ID, "dnsmasq.hosts")
