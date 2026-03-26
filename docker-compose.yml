@@ -8,7 +8,9 @@ x-logging: &logging
 
 services:
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     command: ["/backend", "-config", "/etc/otiv/config.yaml"]
     ports:
       - "8000:8080"

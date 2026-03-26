@@ -14,9 +14,18 @@ button {
   padding: 6px 14px;
   font-size: 13px;
   font-weight: 500;
-  transition: opacity 0.15s;
+  transition: filter 0.15s, transform 0.12s, box-shadow 0.15s;
 }
-button:hover { opacity: 0.85; }
+button:hover:not(:disabled) {
+  filter: brightness(1.25);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+button:active:not(:disabled) {
+  filter: brightness(0.95);
+  transform: translateY(0);
+  box-shadow: none;
+}
 button:disabled { opacity: 0.4; cursor: default; }
 
 input {
@@ -27,5 +36,57 @@ input {
   padding: 8px 12px;
   font-size: 14px;
   outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
-input:focus { border-color: #6366f1; }
+input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.18);
+}
+input:hover:not(:focus) {
+  border-color: #4b5563;
+}
+
+/* Download dropdown items */
+.dl-item {
+  transition: background 0.12s, color 0.12s, padding-left 0.12s;
+}
+.dl-item:hover {
+  background: #374151;
+  color: #fff;
+  padding-left: 20px;
+}
+
+/* Hostname editable cell */
+.hostname-cell {
+  transition: color 0.12s;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: transparent;
+}
+.hostname-cell:hover {
+  color: #c7d2fe !important;
+  text-decoration-color: #818cf8;
+}
+
+/* Collapsible section title */
+.section-toggle:hover {
+  color: #d1d5db !important;
+}
+
+/* Instance card */
+.instance-card {
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.instance-card:hover {
+  border-color: #4f46e5 !important;
+  box-shadow: 0 0 0 1px #4f46e522, 0 4px 24px rgba(79,70,229,0.12);
+}
+
+/* Table rows */
+.client-row {
+  transition: background 0.12s;
+}
+.client-row:hover {
+  background: #1f2937;
+}

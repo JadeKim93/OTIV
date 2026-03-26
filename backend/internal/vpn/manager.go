@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
@@ -99,11 +101,35 @@ func (m *Manager) loadInstances() error {
 	return nil
 }
 
+// serverIPFromSubnet returns the VPN server IP from a subnet (e.g. "10.8.0.0" → "10.8.0.1").
+func serverIPFromSubnet(subnet string) string {
+	parts := strings.Split(subnet, ".")
+	if len(parts) == 4 {
+		parts[3] = "1"
+		return strings.Join(parts, ".")
+	}
+	return subnet
+}
+
 // startContainer creates and starts a Docker container for inst, using the
 // config files already on disk. Updates inst.ContainerID on success.
 func (m *Manager) startContainer(ctx context.Context, inst *Instance) error {
 	containerName := m.containerName(inst.ID)
+	instanceDir := filepath.Join(m.dataDir, "instances", inst.ID)
 	hostInstanceDir := filepath.Join(m.cfg.HostDataDir, "instances", inst.ID)
+
+	// Regenerate server.conf so template changes (e.g. DNS push) take effect on restart.
+	serverConf := fmt.Sprintf(ovpnServerConfig, inst.Subnet, serverIPFromSubnet(inst.Subnet), mgmtPort)
+	_ = os.WriteFile(filepath.Join(instanceDir, "server.conf"), []byte(serverConf), 0644)
+
+	// Ensure dnsmasq.hosts exists so the container can bind-mount it.
+	hostsPath := filepath.Join(instanceDir, "dnsmasq.hosts")
+	if _, err := os.Stat(hostsPath); os.IsNotExist(err) {
+		_ = os.WriteFile(hostsPath, []byte{}, 0644)
+	}
+
+	// Ensure ccd directory exists — OpenVPN reads per-CN files here for kick/block.
+	_ = os.MkdirAll(filepath.Join(instanceDir, "ccd"), 0755)
 
 	resp, err := m.docker.ContainerCreate(ctx,
 		&container.Config{
@@ -188,7 +214,7 @@ func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, e
 		"ca.crt":      caCert,
 		"server.crt":  serverCert.CertPEM,
 		"server.key":  serverCert.KeyPEM,
-		"server.conf": []byte(fmt.Sprintf(ovpnServerConfig, subnet, mgmtPort)),
+		"server.conf": []byte(fmt.Sprintf(ovpnServerConfig, subnet, serverIPFromSubnet(subnet), mgmtPort)),
 	}
 	for name, data := range files {
 		mode := os.FileMode(0644)
@@ -291,6 +317,130 @@ func (m *Manager) GenerateClientConfig(id string) ([]byte, error) {
 	return []byte(cfg), nil
 }
 
+func (m *Manager) KickClient(instanceID, cn string) error {
+	m.mu.RLock()
+	inst, ok := m.instances[instanceID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("instance not found")
+	}
+
+	// Write a CCD disable file so OpenVPN permanently rejects reconnection attempts.
+	// The block is cleared when the instance is stopped/restarted or deleted.
+	ccdPath := filepath.Join(m.dataDir, "instances", instanceID, "ccd", cn)
+	if err := os.WriteFile(ccdPath, []byte("disable\n"), 0644); err != nil {
+		log.Printf("kick: failed to write ccd for %s: %v", cn, err)
+	}
+
+	return inst.KickClient(cn)
+}
+
+// GetInstanceClients returns the connected clients for an instance, auto-assigning
+// a friendly hostname to any new CN that doesn't have one yet.
+func (m *Manager) GetInstanceClients(ctx context.Context, id string) ([]VPNClient, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	inst, ok := m.instances[id]
+	if !ok {
+		return nil, fmt.Errorf("instance not found")
+	}
+
+	clients, _ := inst.GetClients()
+	if clients == nil {
+		clients = []VPNClient{}
+	}
+
+	if inst.Hostnames == nil {
+		inst.Hostnames = make(map[string]string)
+	}
+
+	changed := false
+	for i, c := range clients {
+		if _, ok := inst.Hostnames[c.CommonName]; !ok {
+			inst.Hostnames[c.CommonName] = m.uniqueFriendlyName(inst)
+			changed = true
+		}
+		clients[i].Hostname = inst.Hostnames[c.CommonName]
+	}
+
+	if changed {
+		_ = m.writeDNSHosts(inst, clients)
+		m.reloadDNS(ctx, inst)
+		_ = m.saveInstances()
+	}
+
+	return clients, nil
+}
+
+// SetHostname assigns a custom hostname to a client identified by its CN.
+func (m *Manager) SetHostname(ctx context.Context, instanceID, cn, hostname string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	inst, ok := m.instances[instanceID]
+	if !ok {
+		return fmt.Errorf("instance not found")
+	}
+	if inst.Hostnames == nil {
+		inst.Hostnames = make(map[string]string)
+	}
+	inst.Hostnames[cn] = hostname
+
+	clients, _ := inst.GetClients()
+	if clients == nil {
+		clients = []VPNClient{}
+	}
+	_ = m.writeDNSHosts(inst, clients)
+	m.reloadDNS(ctx, inst)
+	return m.saveInstances()
+}
+
+func (m *Manager) writeDNSHosts(inst *Instance, clients []VPNClient) error {
+	var sb strings.Builder
+	for _, c := range clients {
+		if name, ok := inst.Hostnames[c.CommonName]; ok && c.VirtualIP != "" {
+			sb.WriteString(fmt.Sprintf("%s %s.vpn.local %s\n", c.VirtualIP, name, name))
+		}
+	}
+	hostsPath := filepath.Join(m.dataDir, "instances", inst.ID, "dnsmasq.hosts")
+	return os.WriteFile(hostsPath, []byte(sb.String()), 0644)
+}
+
+func (m *Manager) reloadDNS(ctx context.Context, inst *Instance) {
+	if inst.ContainerID == "" {
+		return
+	}
+	exec, err := m.docker.ContainerExecCreate(ctx, inst.ContainerID, dockertypes.ExecConfig{
+		Cmd: []string{"sh", "-c", "[ -f /var/run/dnsmasq.pid ] && kill -HUP $(cat /var/run/dnsmasq.pid) || true"},
+	})
+	if err != nil {
+		return
+	}
+	_ = m.docker.ContainerExecStart(ctx, exec.ID, dockertypes.ExecStartCheck{})
+}
+
+var adjectives = []string{"amber", "bold", "calm", "dark", "eager", "fast", "glad", "hazy", "icy", "jade", "keen", "lazy", "mild", "neat", "odd", "pale", "quick", "rare", "swift", "tame", "warm", "zany"}
+var nouns = []string{"bear", "crane", "deer", "eagle", "finch", "goat", "hawk", "ibis", "jay", "kite", "lynx", "mink", "newt", "orca", "puma", "quail", "raven", "seal", "teal", "vole", "wolf", "yak"}
+
+func friendlyName() string {
+	return adjectives[rand.Intn(len(adjectives))] + "-" + nouns[rand.Intn(len(nouns))]
+}
+
+func (m *Manager) uniqueFriendlyName(inst *Instance) string {
+	used := make(map[string]bool, len(inst.Hostnames))
+	for _, v := range inst.Hostnames {
+		used[v] = true
+	}
+	for range 50 {
+		name := friendlyName()
+		if !used[name] {
+			return name
+		}
+	}
+	return friendlyName() + "-" + uuid.New().String()[:4]
+}
+
 func (m *Manager) StopInstance(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -368,6 +518,7 @@ func (m *Manager) allocateSubnet() string {
 	return "10.8.0.0"
 }
 
+// ovpnServerConfig args: subnet, serverVPNIP, mgmtPort
 const ovpnServerConfig = `mode server
 tls-server
 proto tcp
@@ -382,6 +533,9 @@ keepalive 10 120
 persist-key
 persist-tun
 verb 3
+client-config-dir /etc/openvpn/ccd
+push "dhcp-option DNS %s"
+push "dhcp-option DOMAIN vpn.local"
 management 0.0.0.0 %d
 `
 

@@ -3,9 +3,12 @@ package api
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -44,11 +47,19 @@ func (h *Handler) Routes() http.Handler {
 		r.Post("/{id}/stop", h.stopInstance)
 		r.Post("/{id}/start", h.startInstance)
 		r.Get("/{id}/clients", h.getClients)
+		r.Post("/{id}/clients/{cn}/kick", h.kickClient)
+		r.Put("/{id}/hostnames/{cn}", h.setHostname)
 		r.Get("/{id}/client-config", h.downloadClientConfig)
 	})
 
 	// WebSocket VPN proxy endpoint
 	r.Get("/vpn/{id}", h.vpnProxy)
+
+	// Generic TCP relay over WebSocket (used by otiv-client proxy HTTP CONNECT)
+	r.Get("/ws-tcp", h.wsTCPRelay)
+
+	// Client binary downloads
+	r.Get("/download/{file}", h.serveDownload)
 
 	// Frontend reverse proxy (catch-all)
 	r.Handle("/*", h.frontendProxy)
@@ -141,17 +152,39 @@ func (h *Handler) deleteInstance(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getClients(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	inst, ok := h.manager.GetInstance(id)
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+	clients, err := h.manager.GetInstanceClients(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-
-	clients, err := inst.GetClients()
-	if err != nil || clients == nil {
-		clients = []vpn.VPNClient{}
-	}
 	writeJSON(w, http.StatusOK, clients)
+}
+
+func (h *Handler) setHostname(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	cn := chi.URLParam(r, "cn")
+	var body struct {
+		Hostname string `json:"hostname"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Hostname == "" {
+		http.Error(w, "hostname required", http.StatusBadRequest)
+		return
+	}
+	if err := h.manager.SetHostname(r.Context(), id, cn, body.Hostname); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) kickClient(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	cn := chi.URLParam(r, "cn")
+	if err := h.manager.KickClient(id, cn); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) downloadClientConfig(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +219,40 @@ func (h *Handler) vpnProxy(w http.ResponseWriter, r *http.Request) {
 	if err := proxy.BridgeWSToTCP(ws, vpnAddr); err != nil {
 		log.Printf("proxy done: %s: %v", id[:8], err)
 	}
+}
+
+func (h *Handler) wsTCPRelay(w http.ResponseWriter, r *http.Request) {
+	host := r.URL.Query().Get("host")
+	port := r.URL.Query().Get("port")
+	if host == "" || port == "" {
+		http.Error(w, "host and port required", http.StatusBadRequest)
+		return
+	}
+
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("ws-tcp upgrade error: %v", err)
+		return
+	}
+	defer ws.Close()
+
+	target := net.JoinHostPort(host, port)
+	log.Printf("ws-tcp relay: → %s", target)
+	if err := proxy.BridgeWSToTCP(ws, target); err != nil {
+		log.Printf("ws-tcp relay done: %s: %v", target, err)
+	}
+}
+
+func (h *Handler) serveDownload(w http.ResponseWriter, r *http.Request) {
+	file := chi.URLParam(r, "file")
+	// Sanitize: reject any path traversal attempts
+	if strings.ContainsAny(file, "/\\") || strings.Contains(file, "..") {
+		http.Error(w, "invalid file", http.StatusBadRequest)
+		return
+	}
+	path := filepath.Join("/downloads", file)
+	w.Header().Set("Content-Disposition", "attachment; filename="+file)
+	http.ServeFile(w, r, path)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

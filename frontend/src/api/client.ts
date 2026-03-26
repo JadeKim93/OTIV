@@ -5,6 +5,7 @@ export interface VPNClient {
   connected_at: string
   bytes_recv: number
   bytes_sent: number
+  hostname?: string
 }
 
 export interface Instance {
@@ -48,6 +49,16 @@ export const api = {
 
   getClients: (id: string) =>
     request<VPNClient[]>(`/api/instances/${id}/clients`),
+
+  kickClient: (id: string, cn: string) =>
+    request<void>(`/api/instances/${id}/clients/${encodeURIComponent(cn)}/kick`, { method: 'POST' }),
+
+  setHostname: (id: string, cn: string, hostname: string) =>
+    request<void>(`/api/instances/${id}/hostnames/${encodeURIComponent(cn)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostname }),
+    }),
 
   clientConfigUrl: (id: string) => `/api/instances/${id}/client-config`,
 }
