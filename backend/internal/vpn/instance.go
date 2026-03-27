@@ -79,6 +79,12 @@ func (i *Instance) GetClients() ([]VPNClient, error) {
 // KickClient sends a management interface 'kill <cn>' command to disconnect
 // the client with the given Common Name.
 func (i *Instance) KickClient(cn string) error {
+	// Validate CN to prevent management interface injection via newlines or
+	// other special characters.
+	if !isValidCN(cn) {
+		return fmt.Errorf("invalid client CN")
+	}
+
 	conn, err := net.DialTimeout("tcp", i.MgmtAddr, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("management connect: %w", err)

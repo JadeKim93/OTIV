@@ -8,6 +8,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -18,7 +19,19 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	// Allow non-browser clients (CLI tools don't send Origin).
+	// For browser clients, enforce same-origin to prevent CSWSH.
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return u.Host == r.Host
+	},
 }
 
 type Handler struct {
@@ -221,11 +234,47 @@ func (h *Handler) vpnProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isBlockedRelayAddr returns true for loopback and link-local addresses that
+// should not be reachable via the ws-tcp relay to prevent SSRF.
+func isBlockedRelayAddr(host string) bool {
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return true
+		}
+		ips = []string{ip.String()}
+	}
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) wsTCPRelay(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("host")
 	port := r.URL.Query().Get("port")
 	if host == "" || port == "" {
 		http.Error(w, "host and port required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate port is a number in the valid range.
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		http.Error(w, "invalid port", http.StatusBadRequest)
+		return
+	}
+
+	// Block loopback and link-local to prevent SSRF against the host itself.
+	if isBlockedRelayAddr(host) {
+		http.Error(w, "forbidden target", http.StatusForbidden)
 		return
 	}
 

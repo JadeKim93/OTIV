@@ -437,7 +437,26 @@ func detectTunInterface() (string, error) {
 	return "", fmt.Errorf("no tun interface found (is openvpn running?)")
 }
 
+// isValidInterface checks that iface contains only characters legal in Linux
+// interface names and is within the IFNAMSIZ-1 (15) character limit.
+func isValidInterface(iface string) bool {
+	if len(iface) == 0 || len(iface) > 15 {
+		return false
+	}
+	for _, r := range iface {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' || r == ':') {
+			return false
+		}
+	}
+	return true
+}
+
 func applyDNS(iface, dnsIP string) error {
+	if !isValidInterface(iface) {
+		return fmt.Errorf("invalid interface name: %q", iface)
+	}
+
 	// resolvectl — preferred (systemd >= 239, replaces systemd-resolve)
 	if _, err := exec.LookPath("resolvectl"); err == nil {
 		if out, err := exec.Command("resolvectl", "dns", iface, dnsIP).CombinedOutput(); err != nil {

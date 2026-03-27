@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -73,6 +74,9 @@ func (p *PKI) loadCA() error {
 		return err
 	}
 	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return fmt.Errorf("failed to decode CA key PEM")
+	}
 	key, err := x509.ParseECPrivateKey(block.Bytes)
 	if err != nil {
 		return err
@@ -83,6 +87,9 @@ func (p *PKI) loadCA() error {
 		return err
 	}
 	block, _ = pem.Decode(certPEM)
+	if block == nil {
+		return fmt.Errorf("failed to decode CA cert PEM")
+	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return err

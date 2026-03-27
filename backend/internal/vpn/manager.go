@@ -2,12 +2,14 @@ package vpn
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
+	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,15 @@ const (
 	ovpnTCPPort = 1194
 	mgmtPort    = 7505
 )
+
+// validCN matches only safe characters for Common Names used in file paths and
+// the OpenVPN management interface. Rejects newlines, slashes, and other
+// special characters that could enable injection or path traversal.
+var validCN = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+func isValidCN(cn string) bool {
+	return validCN.MatchString(cn)
+}
 
 type Manager struct {
 	mu        sync.RWMutex
@@ -184,7 +195,7 @@ func (m *Manager) saveInstances() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(m.dataDir, "instances.json"), data, 0644)
+	return os.WriteFile(filepath.Join(m.dataDir, "instances.json"), data, 0600)
 }
 
 func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, error) {
@@ -318,6 +329,10 @@ func (m *Manager) GenerateClientConfig(id string) ([]byte, error) {
 }
 
 func (m *Manager) KickClient(instanceID, cn string) error {
+	if !isValidCN(cn) {
+		return fmt.Errorf("invalid client CN")
+	}
+
 	m.mu.RLock()
 	inst, ok := m.instances[instanceID]
 	m.mu.RUnlock()
@@ -328,7 +343,7 @@ func (m *Manager) KickClient(instanceID, cn string) error {
 	// Write a CCD disable file so OpenVPN permanently rejects reconnection attempts.
 	// The block is cleared when the instance is stopped/restarted or deleted.
 	ccdPath := filepath.Join(m.dataDir, "instances", instanceID, "ccd", cn)
-	if err := os.WriteFile(ccdPath, []byte("disable\n"), 0644); err != nil {
+	if err := os.WriteFile(ccdPath, []byte("disable\n"), 0600); err != nil {
 		log.Printf("kick: failed to write ccd for %s: %v", cn, err)
 	}
 
@@ -378,15 +393,32 @@ func (m *Manager) GetInstanceClients(ctx context.Context, id string) ([]VPNClien
 	return clients, nil
 }
 
-// sanitizeHostname replaces whitespace with hyphens and lowercases the result
-// so the name is valid as a DNS label.
+// sanitizeHostname returns a valid DNS label: only a-z, 0-9, and hyphens.
+// All other characters (including newlines, which could inject dnsmasq entries)
+// are dropped or converted to hyphens.
 func sanitizeHostname(name string) string {
-	return strings.ToLower(strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' {
+	result := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A') // lowercase
+		case r >= '0' && r <= '9':
+			return r
+		case r == ' ' || r == '\t' || r == '_':
 			return '-'
+		default:
+			return -1 // drop (includes \n, \r, /, \, etc.)
 		}
-		return r
-	}, name))
+	}, name)
+	result = strings.Trim(result, "-")
+	if len(result) > 63 {
+		result = result[:63]
+	}
+	if result == "" {
+		return "host"
+	}
+	return result
 }
 
 // SetHostname assigns a custom hostname to a client identified by its CN.
@@ -441,7 +473,9 @@ var adjectives = []string{"amber", "bold", "calm", "dark", "eager", "fast", "gla
 var nouns = []string{"bear", "crane", "deer", "eagle", "finch", "goat", "hawk", "ibis", "jay", "kite", "lynx", "mink", "newt", "orca", "puma", "quail", "raven", "seal", "teal", "vole", "wolf", "yak"}
 
 func friendlyName() string {
-	return adjectives[rand.Intn(len(adjectives))] + "-" + nouns[rand.Intn(len(nouns))]
+	adjIdx, _ := crand.Int(crand.Reader, big.NewInt(int64(len(adjectives))))
+	nounIdx, _ := crand.Int(crand.Reader, big.NewInt(int64(len(nouns))))
+	return adjectives[adjIdx.Int64()] + "-" + nouns[nounIdx.Int64()]
 }
 
 func (m *Manager) uniqueFriendlyName(inst *Instance) string {
