@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -364,6 +365,12 @@ func cmdDNSList(args []string, fc *fileConfig) {
 // ── dns apply ─────────────────────────────────────────────────────────────────
 
 func cmdDNSApply(args []string, fc *fileConfig) {
+	if runtime.GOOS == "windows" {
+		fmt.Fprintln(os.Stderr, "error: dns apply is not supported on Windows.")
+		fmt.Fprintln(os.Stderr, "DNS를 수동으로 설정하세요: 네트워크 어댑터 설정 → OpenVPN TAP 어댑터 → DNS 서버 주소 입력")
+		os.Exit(1)
+	}
+
 	fs := flag.NewFlagSet("dns apply", flag.ExitOnError)
 	iface := fs.String("interface", "", "tunnel interface (auto-detected if empty)")
 	dnsIP := fs.String("dns", "", "DNS server IP (auto-derived from server if empty)")
@@ -441,6 +448,8 @@ func applyDNS(iface, dnsIP string) error {
 		if out, err := exec.Command("resolvectl", "domain", iface, "~vpn.local", "vpn.local").CombinedOutput(); err != nil {
 			return fmt.Errorf("resolvectl domain: %w\n%s", err, out)
 		}
+		// Flush cached answers so new DNS takes effect immediately.
+		_ = exec.Command("resolvectl", "flush-caches").Run()
 		printDNSVerify(iface, dnsIP)
 		return nil
 	}
@@ -458,6 +467,7 @@ func applyDNS(iface, dnsIP string) error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("systemd-resolve: %w", err)
 		}
+		_ = exec.Command("resolvectl", "flush-caches").Run()
 		printDNSVerify(iface, dnsIP)
 		return nil
 	}
