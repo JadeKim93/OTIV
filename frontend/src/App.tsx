@@ -3,11 +3,11 @@ import { api, Instance } from './api/client'
 import InstanceCard from './components/InstanceCard'
 
 const PLATFORMS = [
-  { label: 'Linux x64',   file: (n: string) => `${n}-linux-amd64`   },
-  { label: 'Linux arm64', file: (n: string) => `${n}-linux-arm64`   },
-  { label: 'macOS x64',   file: (n: string) => `${n}-darwin-amd64`  },
-  { label: 'macOS arm64', file: (n: string) => `${n}-darwin-arm64`  },
-  { label: 'Windows x64', file: (n: string) => `${n}-windows-amd64.exe` },
+  { label: 'Linux x64',   file: (n: string) => `${n}-linux-amd64`,       dl: 'otiv-client'      },
+  { label: 'Linux arm64', file: (n: string) => `${n}-linux-arm64`,       dl: 'otiv-client'      },
+  { label: 'macOS x64',   file: (n: string) => `${n}-darwin-amd64`,      dl: 'otiv-client'      },
+  { label: 'macOS arm64', file: (n: string) => `${n}-darwin-arm64`,      dl: 'otiv-client'      },
+  { label: 'Windows x64', file: (n: string) => `${n}-windows-amd64.exe`, dl: 'otiv-client.exe'  },
 ]
 
 function DownloadMenu({ name }: { name: string }) {
@@ -31,7 +31,7 @@ function DownloadMenu({ name }: { name: string }) {
       {open && (
         <div style={dlMenuStyle}>
           {PLATFORMS.map(p => (
-            <a key={p.label} href={`/download/${p.file(name)}`} download style={dlItemStyle}
+            <a key={p.label} href={`/download/${p.file(name)}`} download={p.dl} style={dlItemStyle}
                className="dl-item" onClick={() => setOpen(false)}>
               {p.label}
             </a>

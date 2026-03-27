@@ -355,18 +355,23 @@ func (m *Manager) GetInstanceClients(ctx context.Context, id string) ([]VPNClien
 		inst.Hostnames = make(map[string]string)
 	}
 
-	changed := false
+	newHostname := false
 	for i, c := range clients {
 		if _, ok := inst.Hostnames[c.CommonName]; !ok {
 			inst.Hostnames[c.CommonName] = m.uniqueFriendlyName(inst)
-			changed = true
+			newHostname = true
 		}
 		clients[i].Hostname = inst.Hostnames[c.CommonName]
 	}
 
-	if changed {
+	// Always sync dnsmasq.hosts with the current connected-client set.
+	// Even if no new hostnames were assigned, the hosts file may be stale
+	// (e.g. after a container restart) or a client's virtual IP may have changed.
+	if len(clients) > 0 || newHostname {
 		_ = m.writeDNSHosts(inst, clients)
 		m.reloadDNS(ctx, inst)
+	}
+	if newHostname {
 		_ = m.saveInstances()
 	}
 
@@ -544,6 +549,7 @@ ecdh-curve prime256v1
 keepalive 10 120
 persist-key
 persist-tun
+client-to-client
 verb 3
 client-config-dir /etc/openvpn/ccd
 push "dhcp-option DNS %s"

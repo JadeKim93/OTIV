@@ -165,7 +165,7 @@ func cmdConnect(args []string, fc *fileConfig) {
 		fmt.Fprintln(os.Stderr, "Usage: otiv-client connect <ws-url> [-port 11194] [-config file.ovpn]")
 		fs.PrintDefaults()
 	}
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args))
 
 	wsURL := fs.Arg(0)
 
@@ -211,7 +211,8 @@ func cmdConnect(args []string, fc *fileConfig) {
 		log.Printf("[client] config saved to %s", tmp)
 	}
 
-	cmd := exec.Command("openvpn", "--config", ovpnFile)
+	ovpnBin := findOpenVPN()
+	cmd := exec.Command(ovpnBin, "--config", ovpnFile)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -251,7 +252,7 @@ func cmdProxy(args []string, fc *fileConfig) {
 		fmt.Fprintln(os.Stderr, "HTTP proxy:      http://127.0.0.1:<http-port>  (CONNECT only)")
 		fs.PrintDefaults()
 	}
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args))
 
 	wsURL := fs.Arg(0)
 
@@ -329,7 +330,7 @@ func cmdDNSList(args []string, fc *fileConfig) {
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: otiv-client dns list <ws-url>")
 	}
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args))
 
 	wsURL := fs.Arg(0)
 	if wsURL == "" && fc != nil {
@@ -370,7 +371,7 @@ func cmdDNSApply(args []string, fc *fileConfig) {
 		fmt.Fprintln(os.Stderr, "Usage: otiv-client dns apply <ws-url> [-interface tun0] [-dns 10.X.0.1]")
 		fs.PrintDefaults()
 	}
-	fs.Parse(args)
+	fs.Parse(reorderArgs(args))
 
 	wsURL := fs.Arg(0)
 
@@ -414,7 +415,6 @@ func cmdDNSApply(args []string, fc *fileConfig) {
 		log.Fatalf("apply DNS: %v", err)
 	}
 	fmt.Printf("DNS %s applied to interface %s\n", *dnsIP, *iface)
-	fmt.Printf("You can now resolve *.vpn.local hostnames.\n")
 }
 
 func detectTunInterface() (string, error) {
@@ -431,20 +431,38 @@ func detectTunInterface() (string, error) {
 }
 
 func applyDNS(iface, dnsIP string) error {
+	// resolvectl — preferred (systemd >= 239, replaces systemd-resolve)
+	if _, err := exec.LookPath("resolvectl"); err == nil {
+		if out, err := exec.Command("resolvectl", "dns", iface, dnsIP).CombinedOutput(); err != nil {
+			return fmt.Errorf("resolvectl dns: %w\n%s", err, out)
+		}
+		// ~vpn.local = routing domain (routes *.vpn.local queries to this DNS)
+		// vpn.local  = search domain  (ping hostname resolves as hostname.vpn.local)
+		if out, err := exec.Command("resolvectl", "domain", iface, "~vpn.local", "vpn.local").CombinedOutput(); err != nil {
+			return fmt.Errorf("resolvectl domain: %w\n%s", err, out)
+		}
+		printDNSVerify(iface, dnsIP)
+		return nil
+	}
+
+	// systemd-resolve — older API fallback
 	if _, err := exec.LookPath("systemd-resolve"); err == nil {
 		cmd := exec.Command("systemd-resolve",
 			"--interface="+iface,
 			"--set-dns="+dnsIP,
-			"--set-domain=vpn.local",
+			"--set-domain=~vpn.local", // routing domain
+			"--set-domain=vpn.local",  // search domain
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("systemd-resolve: %w", err)
 		}
+		printDNSVerify(iface, dnsIP)
 		return nil
 	}
 
+	// resolvconf fallback
 	if _, err := exec.LookPath("resolvconf"); err == nil {
 		input := fmt.Sprintf("nameserver %s\nsearch vpn.local\n", dnsIP)
 		cmd := exec.Command("resolvconf", "-a", iface+".openvpn", "-m", "0")
@@ -454,14 +472,40 @@ func applyDNS(iface, dnsIP string) error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("resolvconf: %w", err)
 		}
+		printDNSVerify(iface, dnsIP)
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "systemd-resolve and resolvconf not found.\n")
-	fmt.Fprintf(os.Stderr, "Apply DNS manually:\n\n")
-	fmt.Fprintf(os.Stderr, "  echo 'nameserver %s' | sudo tee /etc/resolv.conf\n\n", dnsIP)
-	fmt.Fprintf(os.Stderr, "Or add to /etc/resolv.conf:\n  nameserver %s\n  search vpn.local\n", dnsIP)
+	fmt.Fprintf(os.Stderr, "resolvectl / systemd-resolve / resolvconf not found.\n")
+	fmt.Fprintf(os.Stderr, "Apply DNS manually — add to /etc/resolv.conf:\n")
+	fmt.Fprintf(os.Stderr, "  nameserver %s\n  search vpn.local\n", dnsIP)
 	return fmt.Errorf("no DNS configuration tool available")
+}
+
+func printDNSVerify(iface, dnsIP string) {
+	fmt.Printf("\nVerify with:\n")
+	fmt.Printf("  resolvectl status %s\n", iface)
+	fmt.Printf("  dig @%s <hostname>.vpn.local\n", dnsIP)
+}
+
+// reorderArgs moves flag-like arguments (starting with "-") to the front so that
+// flag.FlagSet.Parse can handle them even when a positional argument appears first.
+// e.g. ["ws://...", "-port", "11195"]  →  ["-port", "11195", "ws://..."]
+func reorderArgs(args []string) []string {
+	var flagArgs, posArgs []string
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-") {
+			flagArgs = append(flagArgs, args[i])
+			// If it's "-flag value" style (not "-flag=value"), include the value too.
+			if !strings.Contains(args[i], "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+		} else {
+			posArgs = append(posArgs, args[i])
+		}
+	}
+	return append(flagArgs, posArgs...)
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -577,6 +621,25 @@ func downloadConfig(wsURL string) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// findOpenVPN returns the path to the openvpn binary.
+// On Windows it falls back to well-known installation directories when openvpn
+// is not on PATH, so the user does not need to configure environment variables.
+func findOpenVPN() string {
+	if path, err := exec.LookPath("openvpn"); err == nil {
+		return path
+	}
+	candidates := []string{
+		`C:\Program Files\OpenVPN\bin\openvpn.exe`,
+		`C:\Program Files (x86)\OpenVPN\bin\openvpn.exe`,
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "openvpn" // let exec.Command produce a clear error
 }
 
 func configURL(wsURL string) (string, error) {

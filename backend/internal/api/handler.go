@@ -251,7 +251,11 @@ func (h *Handler) serveDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join("/downloads", file)
-	w.Header().Set("Content-Disposition", "attachment; filename="+file)
+	dlName := "otiv-client"
+	if strings.HasSuffix(file, ".exe") {
+		dlName = "otiv-client.exe"
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename="+dlName)
 	http.ServeFile(w, r, path)
 }
 

@@ -23,13 +23,15 @@ logs:
 
 # Build client binary via Go container (no host Go required)
 client:
+	mkdir -p "$(ROOT)/bin"
 	docker run --rm \
 		-v "$(ROOT)/client":/src \
+		-v "$(ROOT)/bin":/out \
 		-w /src \
 		-e CGO_ENABLED=0 \
 		$(GO_IMAGE) \
-		sh -c "go mod tidy && go build -o /src/otiv-client ./cmd/otiv-client"
-	@echo "Built: client/otiv-client"
+		sh -c "go mod tidy && go build -o /out/otiv-client ./cmd/otiv-client"
+	@echo "Built: bin/otiv-client"
 
 # Run backend locally for development via Go container
 dev-backend:
@@ -46,5 +48,5 @@ dev-backend:
 # Remove containers, volumes, and built images
 clean:
 	docker compose down -v
-	rm -rf ./data client/otiv-client
+	rm -rf ./data ./bin
 	docker rmi otiv-openvpn 2>/dev/null || true
