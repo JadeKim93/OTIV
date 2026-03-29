@@ -43,6 +43,14 @@ type Manager struct {
 	pki       *PKI
 	dataDir   string
 	cfg       *config.Config
+	cancel    context.CancelFunc
+	kickHook  func(instanceID, cn string) // called before OpenVPN mgmt kick; may be nil
+}
+
+// SetKickHook registers a function called whenever a client is about to be kicked.
+// Used by the HTTP handler to close the WebSocket connection directly.
+func (m *Manager) SetKickHook(fn func(instanceID, cn string)) {
+	m.kickHook = fn
 }
 
 func NewManager(cfg *config.Config) (*Manager, error) {
@@ -56,19 +64,129 @@ func NewManager(cfg *config.Config) (*Manager, error) {
 		return nil, fmt.Errorf("pki init: %w", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		instances: make(map[string]*Instance),
 		docker:    dc,
 		pki:       pki,
 		dataDir:   cfg.DataDir,
 		cfg:       cfg,
+		cancel:    cancel,
 	}
 
 	if err := m.loadInstances(); err != nil {
+		cancel()
 		return nil, fmt.Errorf("load instances: %w", err)
 	}
 
+	go m.timeoutEnforcer(ctx)
 	return m, nil
+}
+
+// timeoutEnforcer 는 30초 간격으로 접속 시간을 초과한 클라이언트를 kick 한다.
+func (m *Manager) timeoutEnforcer(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.enforceTimeouts()
+		}
+	}
+}
+
+func (m *Manager) enforceTimeouts() {
+	type kick struct {
+		instID string
+		cn     string
+	}
+	var kicks []kick
+
+	m.mu.RLock()
+	for _, inst := range m.instances {
+		if inst.Status != "running" {
+			continue
+		}
+		clients, err := inst.GetClients()
+		if err != nil {
+			continue
+		}
+		for _, c := range clients {
+			limit := m.effectiveTimeout(inst, c.CommonName)
+			if limit <= 0 {
+				continue
+			}
+			if time.Since(c.ConnectedAt) > time.Duration(limit)*time.Second {
+				kicks = append(kicks, kick{inst.ID, c.CommonName})
+			}
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, k := range kicks {
+		log.Printf("timeout: %s 접속시간 초과, kick+CCD (instance: %s)", k.cn, k.instID[:8])
+		// CCD 먼저 → WS close → management kill (순서 중요: 재접속 race 방지)
+		_ = m.DisableCN(k.instID, k.cn)
+		if m.kickHook != nil {
+			m.kickHook(k.instID, k.cn)
+		}
+		_ = m.KickClient(k.instID, k.cn)
+	}
+}
+
+func (m *Manager) EffectiveMaxClients(inst *Instance) int {
+	if inst.MaxClients > 0 {
+		return inst.MaxClients
+	}
+	return m.cfg.MaxClientsPerInstance
+}
+
+// SetMaxClients sets the per-instance max clients limit. 0 or less reverts to global config.
+func (m *Manager) SetMaxClients(instanceID string, max int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.instances[instanceID]
+	if !ok {
+		return fmt.Errorf("instance not found")
+	}
+	if max <= 0 {
+		inst.MaxClients = 0
+	} else {
+		inst.MaxClients = max
+	}
+	m.saveInstances()
+	return nil
+}
+
+func (m *Manager) effectiveTimeout(inst *Instance, cn string) int {
+	// must be called with at least m.mu.RLock held
+	if t, ok := inst.ClientTimeouts[cn]; ok && t > 0 {
+		return t
+	}
+	return m.cfg.ConnectionTimeout
+}
+
+// SetClientTimeout 은 특정 클라이언트의 접속 시간제한을 설정한다.
+// seconds <= 0 이면 전역 설정을 따른다 (per-client 설정 삭제).
+func (m *Manager) SetClientTimeout(instanceID, cn string, seconds int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.instances[instanceID]
+	if !ok {
+		return fmt.Errorf("instance not found")
+	}
+	if inst.ClientTimeouts == nil {
+		inst.ClientTimeouts = make(map[string]int)
+	}
+	if seconds <= 0 {
+		delete(inst.ClientTimeouts, cn)
+	} else {
+		inst.ClientTimeouts[cn] = seconds
+	}
+	m.saveInstances()
+	return nil
 }
 
 func (m *Manager) loadInstances() error {
@@ -258,6 +376,10 @@ func (m *Manager) CreateInstance(ctx context.Context, name string) (*Instance, e
 	return inst, nil
 }
 
+func (m *Manager) Cfg() *config.Config {
+	return m.cfg
+}
+
 func (m *Manager) ListInstances() []*Instance {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -328,6 +450,24 @@ func (m *Manager) GenerateClientConfig(id string) ([]byte, error) {
 	return []byte(cfg), nil
 }
 
+
+// DisableCN writes the CCD disable file to block future reconnections.
+// Must be called BEFORE closing the WebSocket, so OpenVPN rejects any
+// reconnect attempt that arrives while the kick is still in progress.
+func (m *Manager) DisableCN(instanceID, cn string) error {
+	if !isValidCN(cn) {
+		return fmt.Errorf("invalid client CN")
+	}
+	if _, ok := m.instances[instanceID]; !ok {
+		return fmt.Errorf("instance not found")
+	}
+	ccdPath := filepath.Join(m.dataDir, "instances", instanceID, "ccd", cn)
+	if err := os.WriteFile(ccdPath, []byte("disable\n"), 0600); err != nil {
+		return fmt.Errorf("ccd write: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) KickClient(instanceID, cn string) error {
 	if !isValidCN(cn) {
 		return fmt.Errorf("invalid client CN")
@@ -340,8 +480,7 @@ func (m *Manager) KickClient(instanceID, cn string) error {
 		return fmt.Errorf("instance not found")
 	}
 
-	// Write a CCD disable file so OpenVPN permanently rejects reconnection attempts.
-	// The block is cleared when the instance is stopped/restarted or deleted.
+	// CCD disable 는 호출자(handler)가 이미 작성했거나 여기서 보장한다.
 	ccdPath := filepath.Join(m.dataDir, "instances", instanceID, "ccd", cn)
 	if err := os.WriteFile(ccdPath, []byte("disable\n"), 0600); err != nil {
 		log.Printf("kick: failed to write ccd for %s: %v", cn, err)
@@ -541,6 +680,7 @@ func (m *Manager) containerMgmtAddr(id string) string {
 
 // Shutdown stops and removes all managed OpenVPN containers. Called on process exit.
 func (m *Manager) Shutdown(ctx context.Context) {
+	m.cancel()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -600,6 +740,7 @@ persist-key
 persist-tun
 remote-cert-tls server
 data-ciphers AES-256-GCM:AES-128-GCM
+connect-retry-max 5
 verb 3
 <ca>
 %s</ca>

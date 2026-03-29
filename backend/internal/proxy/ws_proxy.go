@@ -9,12 +9,24 @@ import (
 
 // BridgeWSToTCP proxies raw bytes between a WebSocket connection and a TCP address.
 // Runs until either side closes the connection.
-func BridgeWSToTCP(ws *websocket.Conn, tcpAddr string) error {
+// localPort receives the TCP source port chosen by the OS (0 if unavailable); may be nil.
+func BridgeWSToTCP(ws *websocket.Conn, tcpAddr string, localPort chan<- int) error {
 	conn, err := net.Dial("tcp", tcpAddr)
 	if err != nil {
+		if localPort != nil {
+			localPort <- 0
+		}
 		return err
 	}
 	defer conn.Close()
+
+	if localPort != nil {
+		if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+			localPort <- addr.Port
+		} else {
+			localPort <- 0
+		}
+	}
 
 	errc := make(chan error, 2)
 

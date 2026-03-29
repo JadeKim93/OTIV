@@ -8,6 +8,11 @@ export interface VPNClient {
   hostname?: string
 }
 
+export interface BlockedEntry {
+  ip: string
+  blocked_at: string
+}
+
 export interface Instance {
   id: string
   name: string
@@ -15,10 +20,48 @@ export interface Instance {
   status: string
   created_at: string
   clients: VPNClient[]
+  client_timeouts?: Record<string, number>
+  global_timeout: number
+  max_clients: number        // per-instance override (0 = use global)
+  global_max_clients: number // global config value
+  active_conns: number
+}
+
+const TOKEN_KEY = 'otiv_auth_token'
+const ROLE_KEY = 'otiv_auth_role'
+
+export const auth = {
+  getToken: (): string | null => sessionStorage.getItem(TOKEN_KEY),
+  getRole: (): string | null => sessionStorage.getItem(ROLE_KEY),
+  isAuthenticated: (): boolean => !!sessionStorage.getItem(TOKEN_KEY),
+  isAdmin: (): boolean => sessionStorage.getItem(ROLE_KEY) === 'admin',
+  save: (token: string, role: string) => {
+    sessionStorage.setItem(TOKEN_KEY, token)
+    sessionStorage.setItem(ROLE_KEY, role)
+  },
+  clear: () => {
+    sessionStorage.removeItem(TOKEN_KEY)
+    sessionStorage.removeItem(ROLE_KEY)
+  },
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init)
+  const token = auth.getToken()
+  const headers: Record<string, string> = {
+    ...(init?.headers as Record<string, string>),
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  const res = await fetch(path, { ...init, headers })
+  if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
+      auth.clear()
+    }
+    const text = await res.text()
+    throw new Error(text || res.statusText)
+  }
   if (!res.ok) {
     const text = await res.text()
     throw new Error(text || res.statusText)
@@ -28,6 +71,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  login: (password: string) =>
+    fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    }).then(async res => {
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || res.statusText)
+      }
+      return res.json() as Promise<{ token: string; role: string }>
+    }),
+
   listInstances: () =>
     request<Instance[]>('/api/instances'),
 
@@ -61,6 +117,40 @@ export const api = {
     }),
 
   clientConfigUrl: (id: string) => `/api/instances/${id}/client-config`,
+
+  listBlocked: () =>
+    request<BlockedEntry[]>('/api/blocked'),
+
+  blockIP: (ip: string) =>
+    request<void>('/api/blocked', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }),
+
+  unblockIP: (ip: string) =>
+    request<void>(`/api/blocked/${encodeURIComponent(ip)}`, { method: 'DELETE' }),
+
+  banClient: (ip: string) =>
+    request<void>('/api/blocked', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }),
+
+  setMaxClients: (id: string, max: number) =>
+    request<void>(`/api/instances/${id}/max-clients`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max }),
+    }),
+
+  setClientTimeout: (id: string, cn: string, seconds: number) =>
+    request<void>(`/api/instances/${id}/clients/${encodeURIComponent(cn)}/timeout`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seconds }),
+    }),
 }
 
 export function fmtBytes(n: number): string {

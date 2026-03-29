@@ -30,30 +30,17 @@ function downloadYAML(instanceId: string) {
 }
 
 function copyText(text: string) {
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text))
-  } else {
-    fallbackCopy(text)
-  }
-}
-
-function fallbackCopy(text: string) {
-  const el = document.createElement('textarea')
-  el.value = text
-  el.style.cssText = 'position:fixed;opacity:0;top:0;left:0'
-  document.body.appendChild(el)
-  el.focus()
-  el.select()
-  document.execCommand('copy')
-  document.body.removeChild(el)
+  navigator.clipboard.writeText(text)
 }
 
 interface Props {
   instance: Instance
   onDelete: (id: string) => void
+  isAdmin: boolean
+  onTimeoutChange?: (instanceId: string, cn: string, seconds: number) => void
 }
 
-export default function InstanceCard({ instance, onDelete }: Props) {
+export default function InstanceCard({ instance, onDelete, isAdmin, onTimeoutChange }: Props) {
   const [clients, setClients] = useState<VPNClient[]>(instance.clients ?? [])
   const [status, setStatus] = useState(instance.status)
   const [toggling, setToggling] = useState(false)
@@ -134,6 +121,7 @@ export default function InstanceCard({ instance, onDelete }: Props) {
             <span style={statusBadge(status)}>{status}</span>
             <span style={styles.dim}>subnet: {instance.subnet}/24</span>
             <span style={styles.dim}>created: {createdAt}</span>
+            <MaxClientsDisplay instance={instance} isAdmin={isAdmin} />
           </div>
         </div>
         <div style={styles.actions}>
@@ -166,37 +154,73 @@ export default function InstanceCard({ instance, onDelete }: Props) {
           <table style={styles.table}>
             <thead>
               <tr>
-                {['Hostname', 'Common Name', 'Virtual IP', 'Sent', 'Received', 'Connected Since', ''].map(h => (
+                {['Hostname', 'Common Name', 'Virtual IP', ...(isAdmin ? ['Remote IP'] : []), 'Sent', 'Received', 'Connected Since', 'Timeout', ''].map(h => (
                   <th key={h} style={styles.th}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {clients.map((c, i) => (
-                <tr key={i} className="client-row">
-                  <td style={styles.td}>
-                    <HostnameCell
-                      hostname={c.hostname ?? ''}
-                      onSave={name => api.setHostname(instance.id, c.common_name, name).catch(e => alert(String(e)))}
-                    />
-                  </td>
-                  <td style={{ ...styles.td, color: '#6b7280', fontSize: 11 }}>{c.common_name}</td>
-                  <td style={styles.td}>{c.virtual_ip}</td>
-                  <td style={styles.td}>{fmtBytes(c.bytes_sent)}</td>
-                  <td style={styles.td}>{fmtBytes(c.bytes_recv)}</td>
-                  <td style={styles.td}>
-                    {c.connected_at ? new Date(c.connected_at).toLocaleString() : '-'}
-                  </td>
-                  <td style={styles.td}>
-                    <button
-                      onClick={() => api.kickClient(instance.id, c.common_name).catch(e => alert(String(e)))}
-                      style={{ background: '#7c3aed', color: '#fff', fontSize: 11, padding: '2px 8px' }}
-                    >
-                      Kick
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {clients.map((c, i) => {
+                const perClientTimeout = instance.client_timeouts?.[c.common_name] ?? 0
+                const effectiveTimeout = perClientTimeout > 0 ? perClientTimeout : instance.global_timeout
+                const connectedMs = c.connected_at ? new Date(c.connected_at).getTime() : 0
+                const elapsedSec = connectedMs > 0 ? Math.floor((Date.now() - connectedMs) / 1000) : 0
+                const remainingSec = effectiveTimeout > 0 ? effectiveTimeout - elapsedSec : -1
+                return (
+                  <tr key={i} className="client-row">
+                    <td style={styles.td}>
+                      <HostnameCell
+                        hostname={c.hostname ?? ''}
+                        onSave={name => api.setHostname(instance.id, c.common_name, name).catch(e => alert(String(e)))}
+                      />
+                    </td>
+                    <td style={{ ...styles.td, color: '#6b7280', fontSize: 11 }}>{c.common_name}</td>
+                    <td style={styles.td}>{c.virtual_ip}</td>
+                    {isAdmin && <td style={{ ...styles.td, color: '#6b7280', fontSize: 11 }}>{c.real_addr}</td>}
+                    <td style={styles.td}>{fmtBytes(c.bytes_sent)}</td>
+                    <td style={styles.td}>{fmtBytes(c.bytes_recv)}</td>
+                    <td style={styles.td}>
+                      {c.connected_at ? new Date(c.connected_at).toLocaleString() : '-'}
+                    </td>
+                    <td style={styles.td}>
+                      <TimeoutCell
+                        seconds={perClientTimeout}
+                        globalTimeout={instance.global_timeout}
+                        editable={isAdmin}
+                        remaining={remainingSec}
+                        onSave={secs => {
+                          api.setClientTimeout(instance.id, c.common_name, secs).then(() => {
+                            onTimeoutChange?.(instance.id, c.common_name, secs)
+                          }).catch(e => alert(String(e)))
+                        }}
+                      />
+                    </td>
+                    <td style={styles.td}>
+                      {isAdmin && (
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button
+                            onClick={() => api.kickClient(instance.id, c.common_name).catch(e => alert(String(e)))}
+                            style={{ background: '#7c3aed', color: '#fff', fontSize: 11, padding: '2px 8px' }}
+                          >
+                            Kick
+                          </button>
+                          {c.real_addr && (
+                            <button
+                              onClick={() => {
+                                if (!confirm(`IP 차단: ${c.real_addr}\n해당 IP의 모든 연결이 즉시 차단됩니다.`)) return
+                                api.banClient(c.real_addr).catch(e => alert(String(e)))
+                              }}
+                              style={{ background: '#dc2626', color: '#fff', fontSize: 11, padding: '2px 8px' }}
+                            >
+                              Ban
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         )}
@@ -243,6 +267,134 @@ export default function InstanceCard({ instance, onDelete }: Props) {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function MaxClientsDisplay({ instance, isAdmin }: { instance: Instance; isAdmin: boolean }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(instance.max_clients > 0 ? String(instance.max_clients) : '')
+
+  const effectiveMax = instance.max_clients > 0 ? instance.max_clients : instance.global_max_clients
+  const label = effectiveMax > 0
+    ? `${instance.active_conns}/${effectiveMax}${instance.max_clients <= 0 ? '*' : ''}`
+    : `${instance.active_conns}/∞`
+
+  function commit() {
+    const n = parseInt(value, 10)
+    api.setMaxClients(instance.id, isNaN(n) ? 0 : n).catch(e => alert(String(e)))
+    setEditing(false)
+  }
+
+  if (!editing) {
+    return (
+      <span style={{ color: '#6b7280', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+        clients: {label}
+        {isAdmin && (
+          <button onClick={() => setEditing(true)} style={{ background: '#374151', color: '#9ca3af', fontSize: 10, padding: '1px 6px' }}>
+            변경
+          </button>
+        )}
+      </span>
+    )
+  }
+
+  return (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13 }}>
+      max:
+      <input
+        autoFocus
+        type="number"
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+        placeholder="∞"
+        style={{ width: 55, background: '#111827', color: '#e2e8f0', border: '1px solid #4f46e5', borderRadius: 4, padding: '1px 6px', fontSize: 12 }}
+      />
+      <button onClick={commit} style={{ background: '#4f46e5', color: '#fff', fontSize: 10, padding: '1px 6px' }}>확인</button>
+      <button onClick={() => setEditing(false)} style={{ background: '#374151', color: '#9ca3af', fontSize: 10, padding: '1px 6px' }}>취소</button>
+      <span style={{ color: '#4b5563', fontSize: 10 }}>0 이하 = 무제한</span>
+    </span>
+  )
+}
+
+function TimeoutCell({
+  seconds, globalTimeout, editable, remaining, onSave,
+}: { seconds: number; globalTimeout: number; editable: boolean; remaining: number; onSave: (secs: number) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(seconds > 0 ? String(seconds) : '')
+
+  useEffect(() => { if (!editing) setValue(seconds > 0 ? String(seconds) : '') }, [seconds, editing])
+
+  function commit() {
+    const n = parseInt(value, 10)
+    onSave(isNaN(n) ? 0 : n)
+    setEditing(false)
+  }
+
+  const effectiveLimit = seconds > 0 ? seconds : globalTimeout
+  const limitLabel = seconds > 0 ? `${seconds}s` : globalTimeout > 0 ? `${globalTimeout}s*` : '∞'
+  const hasLimit = effectiveLimit > 0
+
+  let remainColor = '#fbbf24'
+  let remainLabel = ''
+  if (hasLimit) {
+    if (remaining < 0) {
+      remainLabel = 'expired'
+      remainColor = '#ef4444'
+    } else if (remaining < 30) {
+      remainLabel = `${remaining}s`
+      remainColor = '#ef4444'
+    } else {
+      remainLabel = `${remaining}s`
+      remainColor = '#fbbf24'
+    }
+  }
+
+  if (!editing) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.3 }}>
+          {hasLimit ? (
+            <>
+              <span style={{ color: remainColor, fontSize: 12, fontWeight: 600 }}>{remainLabel}</span>
+              <span style={{ color: '#4b5563', fontSize: 10 }}>/ {limitLabel}</span>
+            </>
+          ) : (
+            <span style={{ color: '#6b7280', fontSize: 12 }}>∞</span>
+          )}
+        </div>
+        {editable && (
+          <button
+            onClick={() => setEditing(true)}
+            style={{ background: '#374151', color: '#9ca3af', fontSize: 10, padding: '1px 6px' }}
+          >
+            변경
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <input
+          autoFocus
+          type="number"
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') commit()
+            if (e.key === 'Escape') { setValue(seconds > 0 ? String(seconds) : ''); setEditing(false) }
+          }}
+          placeholder="∞"
+          style={{ width: 60, background: '#111827', color: '#e2e8f0', border: '1px solid #4f46e5', borderRadius: 4, padding: '1px 6px', fontSize: 12 }}
+        />
+        <button onClick={commit} style={{ background: '#4f46e5', color: '#fff', fontSize: 10, padding: '1px 6px' }}>확인</button>
+        <button onClick={() => { setValue(seconds > 0 ? String(seconds) : ''); setEditing(false) }} style={{ background: '#374151', color: '#9ca3af', fontSize: 10, padding: '1px 6px' }}>취소</button>
+      </div>
+      <span style={{ color: '#4b5563', fontSize: 10 }}>초 단위 · 0 이하 = 무한</span>
     </div>
   )
 }

@@ -9,19 +9,21 @@ import (
 )
 
 type Instance struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Subnet      string            `json:"subnet"`
-	ContainerID string            `json:"container_id,omitempty"`
-	Status      string            `json:"status"`
-	CreatedAt   time.Time         `json:"created_at"`
-	Hostnames   map[string]string `json:"hostnames,omitempty"` // CN → hostname
-	MgmtAddr    string            `json:"-"`
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Subnet         string            `json:"subnet"`
+	ContainerID    string            `json:"container_id,omitempty"`
+	Status         string            `json:"status"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Hostnames      map[string]string `json:"hostnames,omitempty"`       // CN → hostname
+	ClientTimeouts map[string]int    `json:"client_timeouts,omitempty"` // CN → 초 (0 이하: 전역 기본값 사용)
+	MaxClients     int               `json:"max_clients,omitempty"`     // 0 이하: 전역 기본값 사용
+	MgmtAddr       string            `json:"-"`
 }
 
 type VPNClient struct {
 	CommonName  string    `json:"common_name"`
-	RealAddr    string    `json:"real_addr"`
+	RealAddr    string    `json:"real_addr,omitempty"`
 	VirtualIP   string    `json:"virtual_ip"`
 	ConnectedAt time.Time `json:"connected_at"`
 	BytesRecv   int64     `json:"bytes_recv"`
@@ -64,10 +66,13 @@ func (i *Instance) GetClients() ([]VPNClient, error) {
 		}
 		fmt.Sscanf(parts[5], "%d", &c.BytesRecv)
 		fmt.Sscanf(parts[6], "%d", &c.BytesSent)
-		if len(parts) > 7 && parts[7] != "" {
-			// parts[7] = "2024-01-01 00:00:00", parts[8] = unix timestamp (숫자)
-			t, _ := time.Parse("2006-01-02 15:04:05", parts[7])
-			c.ConnectedAt = t
+		// parts[8] = unix timestamp (timezone-safe)
+		if len(parts) > 8 && parts[8] != "" {
+			var ts int64
+			fmt.Sscanf(parts[8], "%d", &ts)
+			if ts > 0 {
+				c.ConnectedAt = time.Unix(ts, 0)
+			}
 		}
 		clients = append(clients, c)
 	}
@@ -100,7 +105,9 @@ func (i *Instance) KickClient(cn string) error {
 	line := scanner.Text()
 	fmt.Fprintf(conn, "quit\n")
 
-	if strings.HasPrefix(line, "ERROR") {
+	// "not found" means the client already disconnected — CCD file was already
+	// written by the caller, so future reconnects are blocked. Treat as success.
+	if strings.HasPrefix(line, "ERROR") && !strings.Contains(line, "not found") {
 		return fmt.Errorf("kick failed: %s", line)
 	}
 	return nil

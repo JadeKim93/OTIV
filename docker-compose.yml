@@ -11,17 +11,14 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: ["/backend", "-config", "/etc/otiv/config.yaml"]
+    command: ["-config", "/data/config.yaml"]
     ports:
       - "8000:8080"
     environment:
       - HOST_DATA_DIR=${PWD}/data
     volumes:
-      - ./data:/data                    # 호스트 경로 — 사이드카 컨테이너 bind mount에 필요
+      - ./data:/data                    # config.yaml, tls/, instances/ 등 모든 런타임 데이터
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./config.yaml:/etc/otiv/config.yaml:ro
-      # TLS 인증서를 사용할 경우 아래 주석 해제
-      # - /etc/otiv/tls:/etc/otiv/tls:ro
     depends_on:
       - frontend
     networks:
