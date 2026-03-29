@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
+    allowedHosts: true,
     proxy: {
       '/api': 'http://backend:8080',
       '/vpn': { target: 'ws://backend:8080', ws: true },
