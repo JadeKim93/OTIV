@@ -1,6 +1,6 @@
 # OTIV — One-Time Isolated VPN
 
-GUID 기반 WebSocket 터널 위에서 동작하는 일회성 격리 VPN 서버 관리 시스템.
+GUID 기반 WebSocket 터널 위에서 동작하는 격리 VPN 서버 관리 시스템.
 
 ## 개념
 
@@ -10,16 +10,16 @@ GUID 기반 WebSocket 터널 위에서 동작하는 일회성 격리 VPN 서버 
                               ↑
                          otiv-client (TCP↔WSS bridge)
                               ↓
-                    ws://server/vpn/{guid}
+                    https://server/vpn/{guid}
                               ↓
                     [Server PC] Go Backend
                                     ↓
                      Docker: otiv-vpn-{id}:1194 (OpenVPN TCP)
 ```
 
-- 서버는 VPN 인스턴스를 생성할 때마다 GUID 기반 WSS 경로를 발급한다.
+- 서버는 VPN 인스턴스를 생성할 때마다 GUID 기반 WebSocket 경로를 발급한다.
 - 각 인스턴스는 독립된 Docker 컨테이너로 실행되며 C 클래스 서브넷이 서로 다르다.
-- 클라이언트는 GUID URL만 알면 별도 인증 없이 접속할 수 있다.
+- 프론트엔드 진입 시 접속 비밀번호가 요구된다. 관리자 기능은 별도 관리자 비밀번호로 잠긴다.
 
 ## 구성 요소
 
@@ -29,114 +29,164 @@ GUID 기반 WebSocket 터널 위에서 동작하는 일회성 격리 VPN 서버 
 | `frontend` | Vite + React | 인스턴스/클라이언트 현황 대시보드 |
 | `openvpn` | OpenVPN (Docker) | 인스턴스별 TCP VPN 서버 |
 | `otiv-client` | Go | 프록시 + OpenVPN 자동 실행 |
-| `otiv-proxy` | Go | TCP↔WSS 브리지 단독 실행 |
 
 ## 빠른 시작
 
 ### 서버
 
 ```bash
-# 의존성 준비
-cd backend && go mod tidy && cd ..
-
-# OpenVPN 이미지 빌드 + 전체 서비스 실행
-make up
-
-# 로그 확인
-make logs
+make up      # OpenVPN 이미지 빌드 + 전체 서비스 실행
+make logs    # 로그 확인
 ```
 
 서비스가 올라오면 `http://localhost:8000` 에서 대시보드에 접속한다.
+
+초기 실행 시 `/data/config.yaml` 이 자동 생성된다. 비밀번호를 변경한 뒤 `docker compose restart backend` 로 반영한다.
 
 ### 클라이언트 바이너리 빌드
 
 ```bash
 make client
-# → ./bin/otiv-client   (프록시 + OpenVPN 자동 실행)
-# → ./bin/otiv-proxy    (프록시만 단독 실행)
+# → ./bin/otiv-client        (Linux/macOS)
+# → ./bin/otiv-client.exe    (Windows cross-compile)
 ```
 
-### 클라이언트 접속 (otiv-client)
+### 클라이언트 접속
 
 1. 대시보드에서 VPN 인스턴스를 생성한다.
-2. 인스턴스 ID(GUID)를 클라이언트 PC로 전달한다.
-3. 클라이언트 PC에서:
+2. Connect 섹션을 펼쳐 명령어를 복사한다 (Windows / Linux·macOS 탭 제공).
+3. 클라이언트 PC에서 실행:
 
 ```bash
-# .ovpn 자동 다운로드 + 프록시 시작 + openvpn 실행까지 한 번에
-sudo ./otiv-client -url ws://SERVER_HOST:8000/vpn/{guid}
+# Linux / macOS — .ovpn 자동 다운로드 + 프록시 + openvpn 한 번에
+sudo otiv-client connect https://SERVER_HOST/vpn/{guid}
 
-# .ovpn 파일을 직접 지정하려면
-sudo ./otiv-client -url ws://SERVER_HOST:8000/vpn/{guid} -config ./client.ovpn
+# Windows (PowerShell, 관리자 권한)
+otiv-client.exe connect https://SERVER_HOST/vpn/{guid}
+
+# 프로토콜 생략도 동작 (wss:// 로 자동 정규화)
+sudo otiv-client connect SERVER_HOST/vpn/{guid}
 ```
 
-`openvpn` 바이너리가 설치되어 있어야 합니다 (`apt install openvpn`).
+`openvpn` 바이너리가 설치되어 있어야 한다 (`apt install openvpn` / Windows: OpenVPN 공식 설치 프로그램).
 
-### 프록시만 사용 (otiv-proxy)
-
-OpenVPN 연결을 직접 제어하고 싶거나 다른 VPN 클라이언트를 쓸 때:
+#### proxy 모드 (OpenVPN 직접 제어)
 
 ```bash
-./otiv-proxy -url ws://SERVER_HOST:8000/vpn/{guid} -port 11194
-# → localhost:11194 로 OpenVPN 클라이언트를 연결
+otiv-client proxy https://SERVER_HOST/vpn/{guid}
+# → localhost:11194 로 OpenVPN 클라이언트 연결 가능
+# → localhost:8080  HTTP CONNECT 프록시
 ```
+
+#### DNS (Linux / macOS 전용)
+
+```bash
+otiv-client dns list  https://SERVER_HOST/vpn/{guid}
+sudo otiv-client dns apply https://SERVER_HOST/vpn/{guid}
+```
+
+## 인증 및 접근 제어
+
+| 기능 | 방법 |
+| --- | --- |
+| 일반 접속 | 프론트엔드 진입 시 `access_password` 입력 |
+| 관리자 모드 | 로고를 1000ms 안에 5번 클릭 → `admin_password` 입력 |
+| 세션 격리 | `sessionStorage` 사용 — 탭마다 독립 로그인 필요 |
+| IP 자동 차단 | 로그인 실패 10회 → IP 자동 차단 |
+
+## 관리자 기능
+
+- **인스턴스 생성 / 삭제**
+- **클라이언트 Kick**: CCD `disable` 파일 작성 + WebSocket 즉시 종료 → 재접속 차단
+- **클라이언트 Ban**: 실제 HTTP 클라이언트 IP를 차단 목록에 추가 + 활성 세션 즉시 종료
+- **IP 차단 관리**: 차단 목록 조회 / 수동 추가 / 해제 (`/data/blocked_ips.json` 기반, 파일 삭제 시 초기화)
+- **접속 시간제한**: 전역(`connection_timeout`) 및 클라이언트별 개별 설정 (0 이하 = 무제한)
+- **최대 동시 접속 수**: 전역(`max_clients_per_instance`) 및 인스턴스별 개별 설정 (0 이하 = 무제한) — WebSocket 업그레이드 전에 검사하므로 지연 없이 즉시 차단
+- **Remote IP 표시**: 관리자에게만 노출 (백엔드에서 필드 제거)
 
 ## API
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| `GET` | `/api/instances` | 인스턴스 목록 (접속 클라이언트 포함) |
-| `POST` | `/api/instances` | 인스턴스 생성 `{"name": "..."}` |
-| `DELETE` | `/api/instances/{id}` | 인스턴스 삭제 |
-| `GET` | `/api/instances/{id}/clients` | 접속 중인 클라이언트 목록 |
-| `GET` | `/api/instances/{id}/client-config` | .ovpn 파일 다운로드 |
-| `WS` | `/vpn/{id}` | VPN WebSocket 프록시 엔드포인트 |
+| Method | Path | Auth | 설명 |
+| --- | --- | --- | --- |
+| `POST` | `/api/auth` | — | 로그인 `{"password": "..."}` → `{"token", "role"}` |
+| `GET` | `/api/instances` | user | 인스턴스 목록 (클라이언트 포함) |
+| `POST` | `/api/instances` | admin | 인스턴스 생성 `{"name": "..."}` |
+| `DELETE` | `/api/instances/{id}` | user | 인스턴스 삭제 |
+| `POST` | `/api/instances/{id}/stop` | user | 인스턴스 중지 |
+| `POST` | `/api/instances/{id}/start` | user | 인스턴스 시작 |
+| `GET` | `/api/instances/{id}/clients` | user | 접속 클라이언트 목록 |
+| `GET` | `/api/instances/{id}/client-config` | — | .ovpn 파일 다운로드 (UUID가 접근 제어) |
+| `POST` | `/api/instances/{id}/clients/{cn}/kick` | admin | 클라이언트 kick + 재접속 차단 |
+| `PUT` | `/api/instances/{id}/clients/{cn}/timeout` | admin | 클라이언트별 시간제한 설정 (초, 0 이하=전역) |
+| `PUT` | `/api/instances/{id}/max-clients` | admin | 인스턴스별 최대 접속 수 (0 이하=전역) |
+| `PUT` | `/api/instances/{id}/hostnames/{cn}` | user | 클라이언트 hostname 설정 |
+| `GET` | `/api/blocked` | admin | 차단 IP 목록 |
+| `POST` | `/api/blocked` | admin | IP 차단 |
+| `DELETE` | `/api/blocked/{ip}` | admin | IP 차단 해제 |
+| `WS` | `/vpn/{id}` | — | VPN WebSocket 프록시 |
+| `WS` | `/ws-tcp` | — | TCP relay (HTTP CONNECT용) |
+| `GET` | `/download/{file}` | — | 클라이언트 바이너리 다운로드 |
+
+## HTTPS / TLS
+
+`/data/tls/cert.pem` 과 `/data/tls/key.pem` 이 존재하면 자동으로 HTTPS 모드로 동작한다.
+인증서가 없거나 유효하지 않으면 HTTP 로 폴백하고 로그를 남긴다.
+
+```
+data/
+└── tls/
+    ├── cert.pem   # 인증서 (체인 포함 가능)
+    └── key.pem    # 개인키
+```
+
+## 데이터 디렉토리 구조
+
+```text
+data/
+├── config.yaml          # 서버 설정 (초기 실행 시 자동 생성)
+├── blocked_ips.json     # 차단 IP 목록 (삭제 시 차단 목록 초기화)
+├── instances.json       # 인스턴스 상태 (자동 관리)
+├── pki/                 # CA 및 인증서
+└── instances/
+    └── {guid}/
+        ├── server.conf  # OpenVPN 서버 설정
+        ├── ca.crt
+        ├── server.crt / server.key
+        ├── dnsmasq.hosts
+        └── ccd/         # 클라이언트별 설정 (kick 시 disable 파일 생성)
+```
 
 ## WebSocket 터널 프로토콜
 
-클라이언트 스크립트를 다른 언어로 포팅할 때 참고:
+다른 언어로 클라이언트를 구현할 때 참고:
 
-- 연결: `ws(s)://host/vpn/{guid}` 에 WebSocket 연결
+- 연결: `ws(s)://host/vpn/{guid}` 에 WebSocket 연결 (http/https/bare host도 자동 정규화)
 - 프레임: **Binary** 프레임만 사용
 - 내용: OpenVPN TCP 스트림의 raw 바이트를 그대로 전달 (별도 framing 없음)
 - 방향: 양방향 (full-duplex)
-
-## 환경변수 (backend)
-
-| 변수 | 기본값 | 설명 |
-| --- | --- | --- |
-| `LISTEN_ADDR` | `:8080` | HTTP 리스닝 주소 |
-| `DATA_DIR` | `/data` | PKI/인스턴스 데이터 저장 경로 |
-| `DOCKER_NETWORK` | `otiv_network` | 백엔드/프론트엔드 Docker 네트워크 |
-| `VPN_NETWORK` | `otiv_vpn_net` | OpenVPN 컨테이너 전용 internal 네트워크 |
-| `OVPN_IMAGE` | `otiv-openvpn` | OpenVPN Docker 이미지 이름 |
-| `FRONTEND_URL` | `http://frontend:5173` | 프론트엔드 프록시 대상 URL |
 
 ## 디렉토리 구조
 
 ```text
 otiv/
-├── backend/              # Go 백엔드
+├── backend/
 │   └── internal/
-│       ├── config/       # 환경변수 로드
-│       ├── vpn/          # PKI, 인스턴스 구조체, Docker 기반 매니저
-│       ├── api/          # HTTP 핸들러 (REST + WS + 프론트엔드 프록시)
+│       ├── config/       # YAML 설정 로드
+│       ├── vpn/          # PKI, 인스턴스, Docker 매니저, timeout enforcer
+│       ├── api/          # HTTP 핸들러, IP blocker, WebSocket 연결 추적
 │       └── proxy/        # WebSocket ↔ TCP 브리지
 ├── openvpn/              # OpenVPN Alpine 이미지
-├── client/               # 클라이언트 (Go)
-│   ├── cmd/otiv-client/ # 프록시 + OpenVPN 자동 실행
-│   ├── cmd/otiv-proxy/  # TCP↔WSS 브리지 단독
-│   └── internal/bridge/  # 공통 브리지 로직
+├── client/
+│   └── cmd/otiv-client/  # 프록시 + OpenVPN 자동 실행
 ├── frontend/             # Vite + React 대시보드
-
+├── data/                 # 런타임 데이터 (config.yaml, pki, instances)
 ├── docker-compose.yml
 └── Makefile
 ```
 
 ## 주의사항
 
-- GUID URL이 곧 접속 권한이다. 외부에 노출되지 않도록 주의한다.
+- GUID URL이 곧 VPN 접속 권한이다. 외부에 노출되지 않도록 주의한다.
 - `/var/run/docker.sock` 마운트가 필요하다 (사이드카 컨테이너 생성용).
 - 서버에 `/dev/net/tun` 장치가 있어야 한다.
-- OpenVPN 컨테이너는 `internal` 네트워크에만 연결되어 호스트 PC로의 직접 접근이 차단된다.
-- 파일럿 수준의 구현으로, 프로덕션 사용을 상정하지 않는다.
+- OpenVPN 컨테이너는 `internal` 네트워크에만 연결되어 호스트로의 직접 접근이 차단된다.

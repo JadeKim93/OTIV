@@ -198,14 +198,15 @@ func (h *Handler) Routes() http.Handler {
 
 		r.Route("/api/instances", func(r chi.Router) {
 			r.Get("/", h.listInstances)
-			r.With(h.adminMiddleware).Post("/", h.createInstance) // admin only
-			r.Delete("/{id}", h.deleteInstance)
-			r.Post("/{id}/stop", h.stopInstance)
+			r.With(h.adminMiddleware).Post("/", h.createInstance)        // admin only
+			r.With(h.adminMiddleware).Delete("/{id}", h.deleteInstance)  // admin only
+			r.With(h.adminMiddleware).Post("/{id}/stop", h.stopInstance) // admin only
 			r.Post("/{id}/start", h.startInstance)
 			r.Get("/{id}/clients", h.getClients)
 			r.With(h.adminMiddleware).Post("/{id}/clients/{cn}/kick", h.kickClient)            // admin only
 			r.With(h.adminMiddleware).Put("/{id}/clients/{cn}/timeout", h.setClientTimeout)  // admin only
 			r.With(h.adminMiddleware).Put("/{id}/max-clients", h.setMaxClients)              // admin only
+			r.With(h.adminMiddleware).Put("/{id}/locked", h.setLocked)                     // admin only
 			r.Put("/{id}/hostnames/{cn}", h.setHostname)
 		})
 
@@ -522,6 +523,22 @@ func (h *Handler) kickClient(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *Handler) setLocked(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Locked bool `json:"locked"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "locked required", http.StatusBadRequest)
+		return
+	}
+	if err := h.manager.SetLocked(id, body.Locked); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) setMaxClients(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var body struct {
@@ -576,7 +593,11 @@ func (h *Handler) vpnProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// WebSocket 업그레이드 전에 최대 연결 수 확인
+	// WebSocket 업그레이드 전에 잠금 / 최대 연결 수 확인
+	if inst.Locked {
+		http.Error(w, "instance locked", http.StatusServiceUnavailable)
+		return
+	}
 	if max := h.manager.EffectiveMaxClients(inst); max > 0 {
 		if h.countConns(id) >= max {
 			http.Error(w, "instance full", http.StatusServiceUnavailable)

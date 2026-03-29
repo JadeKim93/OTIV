@@ -52,6 +52,23 @@ func loadFileConfig(path string) (*fileConfig, error) {
 
 // ── URL helpers ───────────────────────────────────────────────────────────────
 
+// normalizeWSURL ensures the URL has a ws:// or wss:// scheme.
+// Accepts: wss://, ws://, https://, http://, or bare host (no scheme).
+func normalizeWSURL(raw string) string {
+	switch {
+	case strings.HasPrefix(raw, "wss://"), strings.HasPrefix(raw, "ws://"):
+		return raw
+	case strings.HasPrefix(raw, "https://"):
+		return "wss://" + strings.TrimPrefix(raw, "https://")
+	case strings.HasPrefix(raw, "http://"):
+		return "ws://" + strings.TrimPrefix(raw, "http://")
+	default:
+		// No scheme: assume wss if port 443, otherwise ws.
+		// Simplest: default to wss for bare hostnames (production default).
+		return "wss://" + raw
+	}
+}
+
 func wsToHTTP(wsURL string) string {
 	s := strings.Replace(wsURL, "wss://", "https://", 1)
 	return strings.Replace(s, "ws://", "http://", 1)
@@ -102,7 +119,7 @@ func fetchClients(wsURL string) ([]vpnClient, error) {
 		return nil, err
 	}
 	url := fmt.Sprintf("%s/api/instances/%s/clients", base, id)
-	resp, err := http.Get(url)
+	resp, err := bridge.InsecureHTTPClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
@@ -127,7 +144,7 @@ func fetchInstance(wsURL string) (*instance, error) {
 		return nil, err
 	}
 	url := fmt.Sprintf("%s/api/instances", base)
-	resp, err := http.Get(url)
+	resp, err := bridge.InsecureHTTPClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
@@ -187,6 +204,7 @@ func cmdConnect(args []string, fc *fileConfig) {
 	if wsURL == "" {
 		log.Fatal("usage: otiv-client connect <ws-url>")
 	}
+	wsURL = normalizeWSURL(wsURL)
 
 	proxyAddr := "127.0.0.1:" + *port
 	proxyReady := make(chan error, 1)
@@ -271,6 +289,7 @@ func cmdProxy(args []string, fc *fileConfig) {
 	if wsURL == "" {
 		log.Fatal("usage: otiv-client proxy <ws-url>")
 	}
+	wsURL = normalizeWSURL(wsURL)
 
 	// Derive the server's WS base URL: ws://host:port  (strip /vpn/<guid>)
 	wsBase := wsBaseURL(wsURL)
@@ -340,6 +359,7 @@ func cmdDNSList(args []string, fc *fileConfig) {
 	if wsURL == "" {
 		log.Fatal("usage: otiv-client dns list <ws-url>")
 	}
+	wsURL = normalizeWSURL(wsURL)
 
 	clients, err := fetchClients(wsURL)
 	if err != nil {
@@ -399,6 +419,7 @@ func cmdDNSApply(args []string, fc *fileConfig) {
 	if wsURL == "" {
 		log.Fatal("usage: otiv-client dns apply <ws-url>")
 	}
+	wsURL = normalizeWSURL(wsURL)
 
 	if *dnsIP == "" {
 		inst, err := fetchInstance(wsURL)
@@ -632,7 +653,7 @@ func downloadConfig(wsURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.Get(cfgURL)
+	resp, err := bridge.InsecureHTTPClient.Get(cfgURL)
 	if err != nil {
 		return "", err
 	}

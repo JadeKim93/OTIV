@@ -2,18 +2,24 @@ import { useState, useEffect, useRef } from 'react'
 import { Instance, VPNClient, api, fmtBytes } from '../api/client'
 
 function wsUrl(instanceId: string): string {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${location.host}/vpn/${instanceId}`
+  return `${location.origin}/vpn/${instanceId}`
 }
 
-const COMMANDS = (instanceId: string) => {
+const isWindows = navigator.userAgent.includes('Windows')
+
+const COMMANDS = (instanceId: string, os: 'windows' | 'linux') => {
   const url = wsUrl(instanceId)
-  return [
-    { tag: 'connect', cmd: `sudo otiv-client connect ${url}` },
-    { tag: 'proxy',   cmd: `otiv-client proxy ${url}` },
-    { tag: 'dns list',  cmd: `otiv-client dns list ${url}` },
-    { tag: 'dns apply', cmd: `sudo otiv-client dns apply ${url}` },
+  const bin = os === 'windows' ? './otiv-client.exe' : './otiv-client'
+  const sudo = os === 'windows' ? '' : 'sudo '
+  const cmds = [
+    { tag: 'connect', cmd: `${sudo}${bin} connect ${url}` },
+    { tag: 'proxy',   cmd: `${bin} proxy ${url}` },
   ]
+  if (os === 'linux') {
+    cmds.push({ tag: 'dns list',  cmd: `${bin} dns list ${url}` })
+    cmds.push({ tag: 'dns apply', cmd: `${sudo}${bin} dns apply ${url}` })
+  }
+  return cmds
 }
 
 function downloadYAML(instanceId: string) {
@@ -30,7 +36,17 @@ function downloadYAML(instanceId: string) {
 }
 
 function copyText(text: string) {
-  navigator.clipboard.writeText(text)
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text)
+  } else {
+    const el = document.createElement('textarea')
+    el.value = text
+    el.style.cssText = 'position:fixed;opacity:0'
+    document.body.appendChild(el)
+    el.select()
+    document.execCommand('copy')
+    document.body.removeChild(el)
+  }
 }
 
 interface Props {
@@ -45,8 +61,9 @@ export default function InstanceCard({ instance, onDelete, isAdmin, onTimeoutCha
   const [status, setStatus] = useState(instance.status)
   const [toggling, setToggling] = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [copied, setCopied] = useState<number | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
   const [connectOpen, setConnectOpen] = useState(false)
+  const [osTab, setOsTab] = useState<'windows' | 'linux'>(isWindows ? 'windows' : 'linux')
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => { setStatus(instance.status) }, [instance.status])
@@ -102,15 +119,14 @@ export default function InstanceCard({ instance, onDelete, isAdmin, onTimeoutCha
     }
   }
 
-  function handleCopy(idx: number, text: string) {
+  function handleCopy(key: string, text: string) {
     copyText(text)
-    setCopied(idx)
+    setCopied(key)
     setTimeout(() => setCopied(null), 2000)
   }
 
   const createdAt = new Date(instance.created_at).toLocaleString()
   const isRunning = status === 'running'
-  const commands = COMMANDS(instance.id)
 
   return (
     <div style={styles.card} className="instance-card">
@@ -125,20 +141,49 @@ export default function InstanceCard({ instance, onDelete, isAdmin, onTimeoutCha
           </div>
         </div>
         <div style={styles.actions}>
-          <button
-            onClick={handleToggle}
-            disabled={toggling}
-            style={{ background: isRunning ? '#b45309' : '#16a34a', color: '#fff' }}
-          >
-            {toggling ? '...' : isRunning ? 'Stop' : 'Resume'}
-          </button>
-          <button
-            onClick={handleDelete}
-            disabled={deleting}
-            style={{ background: '#dc2626', color: '#fff' }}
-          >
-            {deleting ? '...' : 'Delete'}
-          </button>
+          {isAdmin && isRunning && (
+            <button
+              onClick={() =>
+                api.setLocked(instance.id, !instance.locked).catch(e => alert(String(e)))
+              }
+              title={instance.locked ? '잠금 해제 (신규 접속 허용)' : '잠금 (신규 접속 차단)'}
+              style={{
+                background: instance.locked ? '#7c3aed' : '#374151',
+                color: instance.locked ? '#fff' : '#9ca3af',
+                fontSize: 14,
+                padding: '4px 10px',
+              }}
+            >
+              {instance.locked ? '🔒' : '🔓'}
+            </button>
+          )}
+          {isAdmin && isRunning && (
+            <button
+              onClick={handleToggle}
+              disabled={toggling}
+              style={{ background: '#b45309', color: '#fff' }}
+            >
+              {toggling ? '...' : 'Stop'}
+            </button>
+          )}
+          {!isRunning && (
+            <button
+              onClick={handleToggle}
+              disabled={toggling}
+              style={{ background: '#16a34a', color: '#fff' }}
+            >
+              {toggling ? '...' : 'Resume'}
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              onClick={handleDelete}
+              disabled={deleting}
+              style={{ background: '#dc2626', color: '#fff' }}
+            >
+              {deleting ? '...' : 'Delete'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -237,20 +282,44 @@ export default function InstanceCard({ instance, onDelete, isAdmin, onTimeoutCha
         </div>
         {connectOpen && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
-            {commands.map(({ tag, cmd }, idx) => (
+            {/* OS 탭 */}
+            <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid #1f2937' }}>
+              {(['windows', 'linux'] as const).map(os => (
+                <button
+                  key={os}
+                  onClick={() => setOsTab(os)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    borderBottom: osTab === os ? '2px solid #6366f1' : '2px solid transparent',
+                    color: osTab === os ? '#e2e8f0' : '#6b7280',
+                    fontSize: 12,
+                    fontWeight: osTab === os ? 600 : 400,
+                    padding: '4px 14px 6px',
+                    cursor: 'pointer',
+                    marginBottom: -1,
+                  }}
+                >
+                  {os === 'windows' ? 'Windows' : 'Linux / macOS'}
+                </button>
+              ))}
+            </div>
+
+            {COMMANDS(instance.id, osTab).map(({ tag, cmd }) => (
               <div key={tag}>
                 <div style={styles.cmdLabel}>
                   <span style={styles.cmdTag}>{tag}</span>
                   <button
-                    onClick={() => handleCopy(idx, cmd)}
-                    style={{ ...styles.copyBtn, background: copied === idx ? '#16a34a' : '#374151' }}
+                    onClick={() => handleCopy(tag, cmd)}
+                    style={{ ...styles.copyBtn, background: copied === tag ? '#16a34a' : '#374151' }}
                   >
-                    {copied === idx ? 'Copied!' : 'Copy'}
+                    {copied === tag ? 'Copied!' : 'Copy'}
                   </button>
                 </div>
                 <code style={styles.code}>{cmd}</code>
               </div>
             ))}
+
             <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
               <a href={api.clientConfigUrl(instance.id)} download>
                 <button style={{ background: '#1f2937', color: '#9ca3af', fontSize: 12 }}>

@@ -143,6 +143,19 @@ func (m *Manager) EffectiveMaxClients(inst *Instance) int {
 	return m.cfg.MaxClientsPerInstance
 }
 
+// SetLocked sets the locked state of an instance.
+func (m *Manager) SetLocked(instanceID string, locked bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.instances[instanceID]
+	if !ok {
+		return fmt.Errorf("instance not found")
+	}
+	inst.Locked = locked
+	m.saveInstances()
+	return nil
+}
+
 // SetMaxClients sets the per-instance max clients limit. 0 or less reverts to global config.
 func (m *Manager) SetMaxClients(instanceID string, max int) error {
 	m.mu.Lock()
@@ -544,6 +557,8 @@ func sanitizeHostname(name string) string {
 			return r + ('a' - 'A') // lowercase
 		case r >= '0' && r <= '9':
 			return r
+		case r == '-':
+			return r
 		case r == ' ' || r == '\t' || r == '_':
 			return '-'
 		default:
@@ -740,7 +755,7 @@ persist-key
 persist-tun
 remote-cert-tls server
 data-ciphers AES-256-GCM:AES-128-GCM
-connect-retry-max 5
+connect-retry-max 1
 verb 3
 <ca>
 %s</ca>

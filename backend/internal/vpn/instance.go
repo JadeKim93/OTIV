@@ -18,6 +18,7 @@ type Instance struct {
 	Hostnames      map[string]string `json:"hostnames,omitempty"`       // CN → hostname
 	ClientTimeouts map[string]int    `json:"client_timeouts,omitempty"` // CN → 초 (0 이하: 전역 기본값 사용)
 	MaxClients     int               `json:"max_clients,omitempty"`     // 0 이하: 전역 기본값 사용
+	Locked         bool              `json:"locked,omitempty"`          // true: 신규 접속 차단
 	MgmtAddr       string            `json:"-"`
 }
 

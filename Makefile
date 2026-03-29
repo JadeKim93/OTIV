@@ -21,17 +21,18 @@ down:
 logs:
 	docker compose logs -f
 
-# Build client binary via Go container (no host Go required)
+# Build client binaries via Go container (no host Go required)
 client:
 	mkdir -p "$(ROOT)/bin"
 	docker run --rm \
 		-v "$(ROOT)/client":/src \
 		-v "$(ROOT)/bin":/out \
 		-w /src \
-		-e CGO_ENABLED=0 \
 		$(GO_IMAGE) \
-		sh -c "go mod tidy && go build -o /out/otiv-client ./cmd/otiv-client"
-	@echo "Built: bin/otiv-client"
+		sh -c "go mod tidy && \
+		  CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -o /out/otiv-client         ./cmd/otiv-client && \
+		  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /out/otiv-client.exe     ./cmd/otiv-client"
+	@echo "Built: bin/otiv-client  bin/otiv-client.exe"
 
 # Run backend locally for development via Go container
 dev-backend:

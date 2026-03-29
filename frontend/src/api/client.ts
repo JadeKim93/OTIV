@@ -25,6 +25,7 @@ export interface Instance {
   max_clients: number        // per-instance override (0 = use global)
   global_max_clients: number // global config value
   active_conns: number
+  locked: boolean
 }
 
 const TOKEN_KEY = 'otiv_auth_token'
@@ -136,6 +137,13 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ip }),
+    }),
+
+  setLocked: (id: string, locked: boolean) =>
+    request<void>(`/api/instances/${id}/locked`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locked }),
     }),
 
   setMaxClients: (id: string, max: number) =>

@@ -3,16 +3,27 @@ import { api, auth, Instance, BlockedEntry } from './api/client'
 import InstanceCard from './components/InstanceCard'
 
 const PLATFORMS = [
-  { label: 'Linux x64',   file: (n: string) => `${n}-linux-amd64`,       dl: 'otiv-client'      },
-  { label: 'Linux arm64', file: (n: string) => `${n}-linux-arm64`,       dl: 'otiv-client'      },
-  { label: 'macOS x64',   file: (n: string) => `${n}-darwin-amd64`,      dl: 'otiv-client'      },
-  { label: 'macOS arm64', file: (n: string) => `${n}-darwin-arm64`,      dl: 'otiv-client'      },
-  { label: 'Windows x64', file: (n: string) => `${n}-windows-amd64.exe`, dl: 'otiv-client.exe'  },
+  { label: 'Linux x64',         file: (n: string) => `${n}-linux-amd64`,       dl: 'otiv-client',     os: 'linux'   },
+  { label: 'Linux arm64',       file: (n: string) => `${n}-linux-arm64`,       dl: 'otiv-client',     os: 'linux'   },
+  { label: 'macOS (Apple Silicon)', file: (n: string) => `${n}-darwin-arm64`,  dl: 'otiv-client',     os: 'mac'     },
+  { label: 'macOS (Intel)',     file: (n: string) => `${n}-darwin-amd64`,      dl: 'otiv-client',     os: 'mac'     },
+  { label: 'Windows x64',       file: (n: string) => `${n}-windows-amd64.exe`, dl: 'otiv-client.exe', os: 'windows' },
 ]
+
+function detectOS(): 'windows' | 'mac' | 'linux' {
+  const ua = navigator.userAgent
+  if (ua.includes('Windows')) return 'windows'
+  if (ua.includes('Mac'))     return 'mac'
+  return 'linux'
+}
 
 function DownloadMenu({ name }: { name: string }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const currentOS = detectOS()
+
+  const primary = PLATFORMS.filter(p => p.os === currentOS)
+  const others  = PLATFORMS.filter(p => p.os !== currentOS)
 
   useEffect(() => {
     if (!open) return
@@ -30,8 +41,16 @@ function DownloadMenu({ name }: { name: string }) {
       </button>
       {open && (
         <div style={dlMenuStyle}>
-          {PLATFORMS.map(p => (
+          {primary.map(p => (
             <a key={p.label} href={`/download/${p.file(name)}`} download={p.dl} style={dlItemStyle}
+               className="dl-item" onClick={() => setOpen(false)}>
+              {p.label}
+            </a>
+          ))}
+          <div style={{ borderTop: '1px solid #374151', margin: '4px 0' }} />
+          {others.map(p => (
+            <a key={p.label} href={`/download/${p.file(name)}`} download={p.dl}
+               style={{ ...dlItemStyle, color: '#6b7280' }}
                className="dl-item" onClick={() => setOpen(false)}>
               {p.label}
             </a>

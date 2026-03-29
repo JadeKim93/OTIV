@@ -4,6 +4,7 @@ package bridge
 
 import (
 	"bufio"
+	"crypto/tls"
 	"io"
 	"log"
 	"net"
@@ -12,6 +13,20 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// InsecureDialer skips TLS certificate verification.
+// OTIV servers commonly use self-signed certificates.
+var InsecureDialer = &websocket.Dialer{
+	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+	Proxy:           http.ProxyFromEnvironment,
+}
+
+// InsecureHTTPClient skips TLS certificate verification for API calls.
+var InsecureHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+	},
+}
 
 // BridgeConnToWS relays bytes between an already-established net.Conn and
 // WebSocket connection. Used for HTTP CONNECT proxying after the 200 response
@@ -81,7 +96,7 @@ func ListenAndProxy(addr, wsURL string, readyCh chan<- error) error {
 func pipe(conn net.Conn, wsURL string) {
 	defer conn.Close()
 
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{})
+	ws, _, err := InsecureDialer.Dial(wsURL, http.Header{})
 	if err != nil {
 		log.Printf("[proxy] ws dial: %v", err)
 		return
@@ -178,7 +193,7 @@ func handleConnect(conn net.Conn, wsBase string) {
 	}
 	relayURL := wsBase + "/ws-tcp?host=" + url.QueryEscape(h) + "&port=" + url.QueryEscape(p)
 
-	ws, _, err := websocket.DefaultDialer.Dial(relayURL, http.Header{})
+	ws, _, err := InsecureDialer.Dial(relayURL, http.Header{})
 	if err != nil {
 		log.Printf("[http-proxy] ws-tcp dial %s:%s: %v", h, p, err)
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))

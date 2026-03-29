@@ -1,36 +1,41 @@
 # OTIV Backend Configuration
-# 이 파일을 수정하고 docker compose up 으로 반영한다.
+# 이 파일을 수정하고 docker compose restart backend 로 반영한다.
+# 실제 적용 파일은 /data/config.yaml 이며, 초기 실행 시 자동 생성된다.
 
-# 접속 비밀번호 — 이 값을 설정하면 프론트엔드 진입 시 비밀번호 입력을 요구한다.
+# 접속 비밀번호 — 프론트엔드 진입 시 입력을 요구한다.
 access_password: "changeme"
 
 # 관리자 비밀번호 — 로고를 1000ms 안에 5번 클릭 시 입력 팝업이 표시된다.
-# 관리자 모드에서는 kick 기능 및 새 VPN 인스턴스 생성이 가능하다.
+# 관리자 모드에서는 인스턴스 생성, kick, ban, 시간제한/접속 수 설정이 가능하다.
 admin_password: "adminchangeme"
 
-# HTTP(S) 리스닝 주소
-listen_addr: ":8080"
+# 리스닝 포트 (숫자 또는 ":8080" 형식 모두 허용)
+port: "8080"
 
-# PKI 및 인스턴스 데이터 저장 경로 (docker-compose의 ./data 볼륨과 일치)
+# PKI 및 인스턴스 데이터 저장 경로
 data_dir: /data
 
-# 호스트에서 본 data_dir 경로 — Docker 데몬이 사이드카 컨테이너 bind mount 경로를
-# 호스트 파일시스템 기준으로 해석하므로 별도로 지정해야 한다.
+# 호스트에서 본 data_dir 경로
 # docker-compose 환경에서는 HOST_DATA_DIR 환경변수로 자동 주입된다.
-# 직접 실행 시에는 실제 호스트 경로로 변경한다. (예: /home/user/otiv/data)
 host_data_dir: /data
-
-# 백엔드/프론트엔드가 사용하는 Docker 네트워크
-docker_network: otiv_network
 
 # OpenVPN 컨테이너 전용 internal 네트워크 (호스트 접근 차단)
 vpn_network: otiv_vpn_net
 
-# OpenVPN Docker 이미지 이름 (make build 로 빌드)
+# OpenVPN Docker 이미지 이름
 ovpn_image: otiv-openvpn
 
 # 프론트엔드 개발 서버 URL (백엔드가 리버스 프록시)
 frontend_url: http://frontend:5173
+
+# VPN 접속 시간제한 (초 단위, 0 이하는 무제한)
+# 관리자 모드에서 클라이언트별로 개별 설정 가능 (0 이하이면 이 전역값을 따름)
+connection_timeout: 0
+
+# 인스턴스당 최대 동시 접속 클라이언트 수 (0 이하는 무제한)
+# 관리자 모드에서 인스턴스별로 개별 설정 가능 (0 이하이면 이 전역값을 따름)
+# WebSocket 업그레이드 전에 검사하므로 초과 시 즉시 503 반환
+max_clients_per_instance: 0
 
 # HTTPS 설정
 # data_dir/tls/ 폴더에 cert.pem, key.pem 을 넣으면 자동으로 HTTPS 로 동작한다.
